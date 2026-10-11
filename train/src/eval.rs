@@ -205,6 +205,35 @@ fn french_report(model: &Model, xkcd: &[(String, [u8; 3])], translations: &Path)
     Ok(())
 }
 
+/// Fit to the curated associations: color error and confidence error against the agreement.
+fn association_report(model: &Model, d: &Derived) {
+    let texts: Vec<&str> = d.associations.iter().map(|a| a.text.as_str()).collect();
+    let preds = model.predict_many(&texts);
+    let mut errs: Vec<f32> = Vec::new();
+    let mut conf_err = 0f32;
+    let mut gated = 0;
+
+    for (a, p) in d.associations.iter().zip(&preds) {
+        errs.push(delta_e(p.oklab, a.oklab));
+        conf_err += (p.confidence - a.agreement).abs();
+
+        if (p.confidence >= 0.5) == (a.agreement >= 0.5) {
+            gated += 1;
+        }
+    }
+
+    errs.sort_by(f32::total_cmp);
+
+    let n = errs.len();
+
+    println!(
+        "associations ({n} forms): median dE {:.4}, p90 {:.4}; mean |confidence - agreement| {:.3}; same side of 0.5: {gated}/{n}",
+        errs[n / 2],
+        errs[n * 9 / 10],
+        conf_err / n as f32
+    );
+}
+
 pub fn report(
     model: &Model,
     d: &Derived,
@@ -240,6 +269,15 @@ pub fn report(
         auc(&mut scored)
     );
 
+    let negatives: Vec<f32> = scored.iter().filter(|s| !s.1).map(|s| s.0).collect();
+    let passing = negatives.iter().filter(|&&c| c >= 0.5).count();
+
+    println!(
+        "holdout negatives at confidence >= 0.5: {passing}/{} ({:.2}%)",
+        negatives.len(),
+        100.0 * passing as f32 / negatives.len().max(1) as f32
+    );
+
     let xkcd = load_xkcd(raw)?;
     let mut errs: Vec<f32> = xkcd
         .iter()
@@ -254,6 +292,7 @@ pub fn report(
     );
 
     french_report(model, &xkcd, translations)?;
+    association_report(model, d);
     css_report(model, d);
 
     let mut rng = StdRng::seed_from_u64(7);

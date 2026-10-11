@@ -189,3 +189,55 @@ fn french_associations_and_rejections() {
         unconfident(text, 0.2);
     }
 }
+
+fn blue_grey(text: &str) {
+    let p = predict(text);
+    let (h, c) = (hue(&p), chroma(&p));
+
+    assert!(
+        (200.0..=290.0).contains(&h) && (0.01..=0.1).contains(&c),
+        "{text}: hue {h:.0} chroma {c:.3} {}",
+        p.hex()
+    );
+}
+
+#[test]
+fn weather_associations() {
+    for word in ["ensoleillé", "sunny"] {
+        hue_within(word, 80.0, YELLOW.1);
+    }
+
+    for word in ["pluvieux", "rainy"] {
+        blue_grey(word);
+    }
+
+    for word in ["chaud", "hot"] {
+        hue_within(word, RED.0, ORANGE.1);
+    }
+
+    for word in ["frais", "cool"] {
+        hue_within(word, 180.0, 280.0);
+    }
+
+    for word in [
+        "ensoleillé",
+        "sunny",
+        "pluvieux",
+        "rainy",
+        "chaud",
+        "hot",
+        "frais",
+        "cool",
+    ] {
+        confident(word, 0.5);
+    }
+}
+
+#[test]
+fn everyday_words_stay_below_the_gate() {
+    for word in [
+        "famille", "amour", "graine", "horloge", "family", "love", "seed", "clock",
+    ] {
+        unconfident(word, 0.5);
+    }
+}

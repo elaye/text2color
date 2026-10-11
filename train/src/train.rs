@@ -1,6 +1,6 @@
 //! Training loop.
 
-use crate::augment::{strip_accents, typo, with_noise};
+use crate::augment::{inflect, strip_accents, typo, with_noise};
 use crate::data::{ConfidenceMap, Derived, is_holdout};
 use anyhow::Result;
 use burn::optim::{AdamWConfig, GradientsParams};
@@ -25,7 +25,10 @@ pub struct Config {
     pub confidence: ConfidenceMap,
     pub neg_weight: f32,
     pub pair_fraction: f32,
+    pub assoc_weight: f32,
+    pub assoc_repeat: usize,
     pub typo_p: f64,
+    pub inflect_p: f64,
     pub noise_p: f64,
     pub accent_p: f64,
     pub seed: u64,
@@ -79,7 +82,22 @@ pub fn build_examples(d: &Derived, cfg: &Config, rng: &mut StdRng) -> Split {
         all.push(negative(format!("{a} {b}")));
     }
 
-    let (holdout, train) = all.into_iter().partition(|e| is_holdout(&e.text));
+    let (holdout, mut train): (Vec<Example>, Vec<Example>) =
+        all.into_iter().partition(|e| is_holdout(&e.text));
+
+    // Curated associations are few and are the only source for their words, so they are never
+    // held out and are repeated to weigh against the survey rows.
+    for a in &d.associations {
+        for _ in 0..cfg.assoc_repeat {
+            train.push(Example {
+                text: a.text.clone(),
+                target: [a.oklab[0], a.oklab[1] * AB_SCALE, a.oklab[2] * AB_SCALE],
+                confidence: a.agreement,
+                weight: cfg.assoc_weight,
+                has_color: true,
+            });
+        }
+    }
 
     Split { train, holdout }
 }
@@ -90,6 +108,15 @@ fn augment(e: &Example, noise_words: &[String], cfg: &Config, rng: &mut StdRng) 
 
     if !text.is_ascii() && rng.random_bool(cfg.accent_p) {
         text = strip_accents(&text);
+    }
+
+    if rng.random_bool(cfg.inflect_p) {
+        let inflected = inflect(&text, rng);
+
+        if inflected != text {
+            text = inflected;
+            confidence *= 0.9;
+        }
     }
 
     if rng.random_bool(cfg.typo_p) {

@@ -1,0 +1,34 @@
+# Words with a colour association that the survey covers poorly or contradicts, one concept per line.
+# english forms<TAB>french forms<TAB>colour<TAB>agreement
+# Forms are comma-separated and replace any survey row with the same text. The colour is one or
+# more survey strings, comma-separated, whose Oklab means are averaged. Agreement is a curated
+# estimate of how broadly speakers would pick that colour for the word, used directly as the
+# confidence target: ~0.85 strong, ~0.75 clear, ~0.6 moderate, below 0.5 no consensus.
+sunny	ensoleillé, ensoleillés, ensoleillement	warm yellow, pale yellow	0.85
+cloudy, clouds	nuageux, nuageuse, nuages	grey, light grey	0.8
+	couvert, temps couvert	grey, light grey	0.6
+rainy, rain, drizzle, shower	pluvieux, pluvieuse, pluie, pluies, bruine, averse	blue grey	0.75
+stormy, storm, thunderstorm	orageux, orageuse, orage, orages, tempête, tempêtes	slate grey, storm grey	0.75
+foggy, misty, hazy	brumeux, brumeuse, brouillard, brume	light grey, fog	0.75
+snowy, snowflake	neigeux, neigeuse, enneigé, flocon	white, pale blue	0.85
+windy, wind, breezy, breeze	venteux, venteuse, vent, brise	pale grey blue, light grey	0.58
+hail	grêle	pale grey, white	0.55
+hot, heat, heatwave, scorching	chaud, chaude, chauds, chaudes, chaleur, canicule, brûlant, brûlante	orange red, red orange	0.75
+warm, warmth	chaleureux	warm orange, orange	0.65
+lukewarm, tepid	tiède	pale peach	0.35
+cool, chilly	frais, fraîche, fraîches, frisquet	light blue, light cyan	0.65
+cold	froid, froide, froids, froides	light blue, powder blue	0.72
+icy, frozen, freezing	glacé, glacée, glacial, glaciale, gelé, gelée, givre	ice blue	0.75
+mild	doux, douce, douces, tempéré, tempérée	pale peach, light peach	0.58
+darkness	sombre, sombres, obscur, obscure, obscurité, ténèbres	almost black, very dark grey	0.8
+bright, luminous	lumineux, lumineuse, lumière, clarté	pale yellow, off white	0.55
+rainbow	arc-en-ciel	rainbow	0.15
+dawn, sunrise	aube, aurore, lever du soleil	peach, pastel pink	0.6
+flames, blaze	flamme, flammes, incendie	fire red, red orange	0.85
+ash, ashes	cendre, cendres, cendré	ash grey, grey	0.7
+smoke, smoky	fumée, fumées	grey, smokey grey	0.6
+coal	charbon	charcoal, black	0.85
+iron	fer	iron, gunmetal	0.6
+milk	lait	white, off white	0.8
+tar, soot	goudron, suie	black, almost black	0.8
+lava	lave	lava	0.75

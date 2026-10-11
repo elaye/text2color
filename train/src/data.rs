@@ -1,5 +1,6 @@
 //! Raw survey parsing, aggregation and the derived dataset files.
 
+use crate::augment::base_forms;
 use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -17,6 +18,9 @@ const SPAM_THRESHOLD: f64 = 0.5;
 const CELL_BITS: u32 = 4;
 /// Exponent on the dominance weight; 1 is a soft centroid, large values approach the argmax cell.
 const DOMINANCE_GAMMA: i32 = 4;
+/// Survey strings with at least this many answers count as colour words whose inflections are
+/// kept out of the negatives.
+const COLOUR_WORD_COUNT: u32 = 20;
 
 /// Weighted color mean plus unweighted spread of the answers for one string.
 ///
@@ -155,6 +159,53 @@ pub fn load_translations(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// One curated concept: its surface forms in both languages, the survey strings giving its
+/// colour, and how broadly speakers agree on that colour.
+struct Concept {
+    forms: Vec<String>,
+    colours: Vec<String>,
+    agreement: f32,
+}
+
+fn split_list(field: &str) -> Vec<String> {
+    field.split(',').filter_map(canonical).collect()
+}
+
+/// Reads `english forms<TAB>french forms<TAB>colours<TAB>agreement` lines.
+fn load_concepts(path: &Path) -> Result<Vec<Concept>> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut out = Vec::new();
+
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
+        let f: Vec<&str> = line.split('\t').collect();
+
+        if f.len() != 4 {
+            bail!("malformed association row: {line}");
+        }
+
+        let mut forms = split_list(f[0]);
+        forms.extend(split_list(f[1]));
+
+        let colours = split_list(f[2]);
+        let agreement: f32 = f[3].trim().parse()?;
+
+        if forms.is_empty() || colours.is_empty() || !(0.0..=1.0).contains(&agreement) {
+            bail!("incomplete association row: {line}");
+        }
+
+        out.push(Concept {
+            forms,
+            colours,
+            agreement,
+        });
+    }
+
+    Ok(out)
+}
+
 /// Words of a frequency list, one per line, optionally followed by a count.
 fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
@@ -167,9 +218,9 @@ fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Reads the raw dump, word lists and translations, writes `positives.tsv` and `negatives.txt`
-/// into `derived`.
-pub fn prepare(raw: &Path, translations: &Path, derived: &Path) -> Result<()> {
+/// Reads the raw dump, word lists, translations and associations, writes `positives.tsv`,
+/// `associations.tsv` and `negatives.txt` into `derived`.
+pub fn prepare(raw: &Path, translations: &Path, associations: &Path, derived: &Path) -> Result<()> {
     let dump = File::open(raw.join("mainsurvey_sqldump.txt")).context("open survey dump")?;
     let mut users: HashMap<u32, bool> = HashMap::new();
     let mut ids: HashMap<String, u32> = HashMap::new();
@@ -267,10 +318,44 @@ pub fn prepare(raw: &Path, translations: &Path, derived: &Path) -> Result<()> {
 
     fs::create_dir_all(derived)?;
 
+    let mut assoc_out = BufWriter::new(File::create(derived.join("associations.tsv"))?);
+    let mut assoc_forms: HashSet<String> = HashSet::new();
+
+    for concept in load_concepts(associations)? {
+        let mut sum = [0f64; 3];
+
+        for colour in &concept.colours {
+            let agg = ids
+                .get(colour)
+                .map(|&id| &aggs[id as usize])
+                .filter(|a| a.n >= MIN_COUNT)
+                .with_context(|| format!("association colour {colour:?} is not a survey string"))?;
+            let m = agg.mean();
+
+            for i in 0..3 {
+                sum[i] += m[i] / concept.colours.len() as f64;
+            }
+        }
+
+        for form in &concept.forms {
+            if !assoc_forms.insert(form.clone()) {
+                bail!("association form {form:?} appears twice");
+            }
+
+            writeln!(
+                assoc_out,
+                "{form}\t{:.5}\t{:.5}\t{:.5}\t{}",
+                sum[0], sum[1], sum[2], concept.agreement
+            )?;
+        }
+    }
+
+    println!("association forms: {}", assoc_forms.len());
+
     let mut rows: Vec<(&String, &Agg)> = names
         .iter()
         .zip(&aggs)
-        .filter(|(_, a)| a.n >= MIN_COUNT)
+        .filter(|(name, a)| a.n >= MIN_COUNT && !assoc_forms.contains(*name))
         .collect();
     rows.sort_by(|a, b| b.1.n.cmp(&a.1.n).then_with(|| a.0.cmp(b.0)));
 
@@ -296,12 +381,27 @@ pub fn prepare(raw: &Path, translations: &Path, derived: &Path) -> Result<()> {
     // Interleaved by rank so that any prefix of the list is bilingual.
     let english = word_list(&raw.join("google-20k.txt"), WORDS_PER_LANGUAGE)?;
     let french = word_list(&raw.join("french-50k.txt"), WORDS_PER_LANGUAGE)?;
+    let colour_words: HashSet<&str> = names
+        .iter()
+        .zip(&aggs)
+        .filter(|(_, a)| a.n >= COLOUR_WORD_COUNT)
+        .map(|(name, _)| name.as_str())
+        .chain(assoc_forms.iter().map(String::as_str))
+        .collect();
+    let is_colour_inflection = |word: &str| {
+        base_forms(word)
+            .iter()
+            .any(|base| colour_words.contains(base.as_str()))
+    };
     let mut negatives = BufWriter::new(File::create(derived.join("negatives.txt"))?);
     let mut seen = HashSet::new();
 
     for i in 0..english.len().max(french.len()) {
         for word in english.get(i).into_iter().chain(french.get(i)) {
-            if !ids.contains_key(word) && seen.insert(word.clone()) {
+            let excluded =
+                ids.contains_key(word) || assoc_forms.contains(word) || is_colour_inflection(word);
+
+            if !excluded && seen.insert(word.clone()) {
                 writeln!(negatives, "{word}")?;
             }
         }
@@ -321,9 +421,18 @@ pub struct Positive {
     pub sigma: f32,
 }
 
+/// One surface form of a curated association.
+#[derive(Debug, Clone)]
+pub struct Association {
+    pub text: String,
+    pub oklab: [f32; 3],
+    pub agreement: f32,
+}
+
 pub struct Derived {
     pub sigma_rand: f32,
     pub positives: Vec<Positive>,
+    pub associations: Vec<Association>,
     pub negatives: Vec<String>,
 }
 
@@ -357,6 +466,24 @@ pub fn load_derived(derived: &Path) -> Result<Derived> {
         });
     }
 
+    let mut associations = Vec::new();
+    let assoc_text = fs::read_to_string(derived.join("associations.tsv"))
+        .context("read associations.tsv (run prepare)")?;
+
+    for line in assoc_text.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+
+        if f.len() != 5 {
+            bail!("malformed associations row: {line}");
+        }
+
+        associations.push(Association {
+            text: f[0].to_string(),
+            oklab: [f[1].parse()?, f[2].parse()?, f[3].parse()?],
+            agreement: f[4].parse()?,
+        });
+    }
+
     let negatives: Vec<String> = fs::read_to_string(derived.join("negatives.txt"))
         .context("read negatives.txt")?
         .lines()
@@ -366,6 +493,7 @@ pub fn load_derived(derived: &Path) -> Result<Derived> {
     Ok(Derived {
         sigma_rand,
         positives,
+        associations,
         negatives,
     })
 }

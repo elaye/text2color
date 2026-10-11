@@ -18,12 +18,14 @@ bleu    #236dd0  rgb( 35,109,208)  confidence 0.82
 - **Color names and modifiers**: "navy", "pale pink", "neon green", "reddish orange".
 - **French**: "vert foncé", "bleu marine", "rose pâle", "herbe", with or without accents.
 - **Typos**: "bleu", "purpel", "ornage" land on the intended color.
-- **Associations**: "grass", "blood", "sky", "lemon", "chocolate".
+- **Associations**: "grass", "blood", "sky", "lemon", "chocolate", and weather words in both
+  languages: "ensoleillé", "pluvieux", "chaud", "sunny", "rainy", "cool".
+- **Inflections**: "vertes", "ensoleillée", "pluvieuses", "sunnier" land where the base form does.
 - **Confidence**: how predictable a color is from the text. Near 1 for an unambiguous color
   name, lower for broad or noisy descriptions ("blue car"), near 0 for text that is not a color
   ("table", "monday").
 
-There is no lexicon and no grammar. Everything above is learned from data.
+There is no lexicon and no grammar at inference time. Everything above is learned from data.
 
 ## How it works
 
@@ -59,9 +61,18 @@ should. The output is converted to sRGB with [`palette`](https://crates.io/crate
   any answers it already had (the survey contains some French, "bleu" and "rouge" among them).
   Several English strings can map to one French string ("grey" and "gray" both give "gris").
   Strings spelled the same in both languages, such as "violet", share one row.
+- Associations: `train/associations.tsv` lists words with a colour association that the survey
+  covers poorly or contradicts, mostly weather and temperature ("ensoleillé", "rainy", "chaud",
+  "cool"), one concept per line with its English and French forms. The colour is the mean of
+  named survey strings ("blue grey"), and a curated agreement score, how broadly speakers would
+  pick that colour, is the confidence target. Words without a consensus ("rainbow") get a low
+  score on purpose. These rows replace survey rows with the same text ("hot" means heat, not
+  "hot pink"; "orage" means storm, not a typo of "orange") and are never held out.
 - Negatives: the top 20 k words of an English and of a French frequency list that never appear
-  among the positives, with confidence target 0 and no color loss.
-- Augmentation during training: accents dropped on half the accented examples, random typos
+  among the positives, nor as an inflection of a common colour word ("vertes", "blanches"), with
+  confidence target 0 and no color loss.
+- Augmentation during training: accents dropped on half the accented examples, inflections
+  (French gender and number, English -er/-est/-y; keep the color, confidence × 0.9), random typos
   (keep the color, confidence × 0.9) and noise words prepended or appended (keep the color,
   confidence × 0.7).
 

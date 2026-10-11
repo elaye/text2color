@@ -20,6 +20,9 @@ struct Cli {
     /// `english<TAB>french` pairs applied to the survey strings
     #[arg(long, default_value = "train/translations/en-fr.tsv")]
     translations: PathBuf,
+    /// Curated word-colour associations with agreement scores
+    #[arg(long, default_value = "train/associations.tsv")]
+    associations: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -64,8 +67,17 @@ struct TrainArgs {
     /// Random negative word pairs, as a fraction of the negative word count
     #[arg(long, default_value_t = 0.5)]
     pair_fraction: f32,
+    /// Loss weight of a curated association example
+    #[arg(long, default_value_t = 4.0)]
+    assoc_weight: f32,
+    /// Copies of each curated association per epoch
+    #[arg(long, default_value_t = 6)]
+    assoc_repeat: usize,
     #[arg(long, default_value_t = 0.3)]
     typo_p: f64,
+    /// Probability of inflecting a word (French gender and number, English -er/-y)
+    #[arg(long, default_value_t = 0.15)]
+    inflect_p: f64,
     #[arg(long, default_value_t = 0.15)]
     noise_p: f64,
     /// Probability of dropping accents from a training example
@@ -96,7 +108,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Prepare => data::prepare(&cli.raw, &cli.translations, &cli.derived),
+        Cmd::Prepare => data::prepare(&cli.raw, &cli.translations, &cli.associations, &cli.derived),
         Cmd::Train(a) => {
             let d = data::load_derived(&cli.derived)?;
             let cfg = train::Config {
@@ -112,7 +124,10 @@ fn main() -> Result<()> {
                 confidence: a.confidence.map(),
                 neg_weight: a.neg_weight,
                 pair_fraction: a.pair_fraction,
+                assoc_weight: a.assoc_weight,
+                assoc_repeat: a.assoc_repeat,
                 typo_p: a.typo_p,
+                inflect_p: a.inflect_p,
                 noise_p: a.noise_p,
                 accent_p: a.accent_p,
                 seed: a.seed,
