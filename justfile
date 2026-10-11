@@ -22,7 +22,7 @@ test:
 
 # Query the embedded model
 query *args:
-    cargo run --release --quiet --example query -- {{args}}
+    cargo run --release --example query -- {{args}}
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
