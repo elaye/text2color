@@ -12,37 +12,61 @@ pub const MAX_TOKENS: usize = 5;
 pub const MAX_CHARS: usize = 40;
 const MIN_COUNT: u32 = 2;
 const SPAM_THRESHOLD: f64 = 0.5;
+/// RGB is binned into 2^CELL_BITS steps per channel to estimate how dominant a name is per cell.
+const CELL_BITS: u32 = 4;
+/// Exponent on the dominance weight; 1 is a soft centroid, large values approach the argmax cell.
+const DOMINANCE_GAMMA: i32 = 4;
 
+/// Weighted color mean plus unweighted spread of the answers for one string.
+///
+/// The mean of all swatches given a name is the centroid of the region where the name is used,
+/// which for names at the gamut boundary ("black", "red") lies well inside the gamut. Weighting
+/// each answer by a power of how dominant its name is in that swatch's cell moves the estimate
+/// toward the color where the name is most probable, and reduces to the plain mean for strings
+/// whose answers are spread one per cell.
 #[derive(Default)]
 struct Agg {
     n: u32,
     sum: [f64; 3],
     sumsq: [f64; 3],
+    wsum: f64,
+    wsum_lab: [f64; 3],
 }
 
 impl Agg {
-    fn push(&mut self, lab: [f32; 3]) {
+    fn push(&mut self, lab: [f32; 3], weight: f64) {
         self.n += 1;
+        self.wsum += weight;
 
-        for ((sum, sumsq), v) in self.sum.iter_mut().zip(self.sumsq.iter_mut()).zip(lab) {
-            *sum += v as f64;
-            *sumsq += (v as f64).powi(2);
+        for (i, &v) in lab.iter().enumerate() {
+            let v = v as f64;
+            self.sum[i] += v;
+            self.sumsq[i] += v * v;
+            self.wsum_lab[i] += weight * v;
         }
     }
 
     fn mean(&self) -> [f64; 3] {
-        self.sum.map(|s| s / self.n as f64)
+        self.wsum_lab.map(|s| s / self.wsum)
     }
 
-    /// Mean squared distance from the mean, summed over the three axes.
+    /// Mean squared distance from the unweighted mean, summed over the three axes.
     fn variance(&self) -> f64 {
-        let m = self.mean();
-
         (0..3)
-            .map(|i| self.sumsq[i] / self.n as f64 - m[i] * m[i])
+            .map(|i| {
+                let m = self.sum[i] / self.n as f64;
+                self.sumsq[i] / self.n as f64 - m * m
+            })
             .sum::<f64>()
             .max(0.0)
     }
+}
+
+fn cell(rgb: [u8; 3]) -> usize {
+    let shift = 8 - CELL_BITS;
+
+    rgb.iter()
+        .fold(0, |acc, &c| (acc << CELL_BITS) | (c >> shift) as usize)
 }
 
 /// Splits `INSERT INTO "t" VALUES(...)` into table name and the raw value list.
@@ -101,8 +125,9 @@ pub fn canonical(text: &str) -> Option<String> {
 pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
     let dump = File::open(raw.join("mainsurvey_sqldump.txt")).context("open survey dump")?;
     let mut users: HashMap<u32, bool> = HashMap::new();
-    let mut aggs: HashMap<String, Agg> = HashMap::new();
-    let mut global = Agg::default();
+    let mut ids: HashMap<String, u32> = HashMap::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut answers: Vec<(u32, [u8; 3])> = Vec::new();
     let mut dropped = 0u64;
 
     for line in BufReader::new(dump).lines() {
@@ -130,13 +155,37 @@ pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
                 let Some(key) = canonical(&name) else {
                     continue;
                 };
-                let lab = rgb_to_oklab(rgb);
+                let id = *ids.entry(key).or_insert_with_key(|k| {
+                    names.push(k.clone());
+                    names.len() as u32 - 1
+                });
 
-                global.push(lab);
-                aggs.entry(key).or_default().push(lab);
+                answers.push((id, rgb));
             }
             _ => {}
         }
+    }
+
+    let mut cell_total = vec![0u32; 1 << (3 * CELL_BITS)];
+    let mut name_cell: HashMap<(u32, u16), u32> = HashMap::new();
+
+    for &(id, rgb) in &answers {
+        let c = cell(rgb);
+        cell_total[c] += 1;
+        *name_cell.entry((id, c as u16)).or_default() += 1;
+    }
+
+    let mut aggs: Vec<Agg> = (0..names.len()).map(|_| Agg::default()).collect();
+    let mut global = Agg::default();
+
+    for &(id, rgb) in &answers {
+        let c = cell(rgb);
+        let weight =
+            (name_cell[&(id, c as u16)] as f64 / cell_total[c] as f64).powi(DOMINANCE_GAMMA);
+        let lab = rgb_to_oklab(rgb);
+
+        global.push(lab, 1.0);
+        aggs[id as usize].push(lab, weight);
     }
 
     let sigma_rand = global.variance().sqrt();
@@ -144,13 +193,17 @@ pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
         "answers kept {} dropped {} distinct strings {} sigma_rand {:.4}",
         global.n,
         dropped,
-        aggs.len(),
+        names.len(),
         sigma_rand
     );
 
     fs::create_dir_all(derived)?;
 
-    let mut rows: Vec<(&String, &Agg)> = aggs.iter().filter(|(_, a)| a.n >= MIN_COUNT).collect();
+    let mut rows: Vec<(&String, &Agg)> = names
+        .iter()
+        .zip(&aggs)
+        .filter(|(_, a)| a.n >= MIN_COUNT)
+        .collect();
     rows.sort_by(|a, b| b.1.n.cmp(&a.1.n).then_with(|| a.0.cmp(b.0)));
 
     let mut out = BufWriter::new(File::create(derived.join("positives.tsv"))?);
@@ -179,7 +232,7 @@ pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
     for word in words.lines() {
         let Some(key) = canonical(word) else { continue };
 
-        if !aggs.contains_key(&key) {
+        if !ids.contains_key(&key) {
             writeln!(negatives, "{key}")?;
             kept += 1;
         }
@@ -348,6 +401,24 @@ mod tests {
         let (_, spam) = insert_parts(r#"INSERT INTO "users" VALUES(8,'x',1.0,'0.0.0.0',NULL,'LCD',NULL,NULL,1,1,'gray/charcoal',0.9);"#).unwrap();
 
         assert_eq!(user_is_usable(spam), Some((8, false)));
+    }
+
+    #[test]
+    fn dominant_cells_pull_the_mean() {
+        let mut agg = Agg::default();
+
+        agg.push([0.2, 0.0, 0.0], 0.9);
+        agg.push([0.6, 0.0, 0.0], 0.1);
+
+        assert!((agg.mean()[0] - 0.24).abs() < 1e-6);
+        assert!((agg.variance().sqrt() - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cell_index_covers_the_cube() {
+        assert_eq!(cell([0, 0, 0]), 0);
+        assert_eq!(cell([255, 255, 255]), (1 << (3 * CELL_BITS)) - 1);
+        assert_eq!(cell([16, 0, 0]), 1 << (2 * CELL_BITS));
     }
 
     #[test]

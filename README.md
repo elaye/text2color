@@ -10,7 +10,7 @@ println!("{} rgb={:?} oklab={:?} confidence={:.2}", p.hex(), p.rgb, p.oklab, p.c
 
 ```
 $ just query bleu
-bleu    #3177cf  rgb( 49,119,207)  confidence 0.81
+bleu    #236dd0  rgb( 35,109,208)  confidence 0.82
 ```
 
 ## What it does
@@ -45,7 +45,11 @@ should. The output is converted to sRGB with [`palette`](https://crates.io/crate
 - The [xkcd color survey](https://blog.xkcd.com/2010/05/03/color-survey-results/): 3.4 M
   free-text names people typed for random swatches. Answers from users flagged as likely spam
   or colorblind are dropped. Each distinct normalized string with at least two answers becomes a
-  training row with its mean Oklab color and spread.
+  training row. Its color is a weighted Oklab mean of its answers: swatches are binned into a
+  coarse RGB grid, and each answer is weighted by how dominant its string is in that bin, so the
+  row sits where the name is most probable rather than at the centroid of where it was used.
+  The plain centroid shrinks every name on the gamut boundary inward ("black" lands on a dark
+  grey). The spread is the unweighted one.
 - The confidence target is a logistic on the string's spread relative to random swatches, plus
   a small term for how often the string was used. Strings everybody agrees on score high;
   "idk" and "ugly" score low.
@@ -63,10 +67,10 @@ From `just eval` on the shipped model (x86_64 desktop, single thread):
 
 | metric | value |
 |---|---|
-| hold-out mean Oklab error (confident strings) | 0.077 |
-| xkcd 949 names, median / p90 Oklab error | 0.050 / 0.107 |
-| confidence AUC, color strings vs non-words | 0.989 |
-| typo robustness (one random edit keeps the color) | 84.6 % |
+| hold-out mean Oklab error (confident strings) | 0.082 |
+| xkcd 949 names, median / p90 Oklab error | 0.040 / 0.089 |
+| confidence AUC, color strings vs non-words | 0.987 |
+| typo robustness (one random edit keeps the color) | 78.6 % |
 | latency per query | 3 µs |
 | weights file (f16) | 8.4 MB |
 
