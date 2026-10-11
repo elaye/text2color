@@ -27,3 +27,7 @@ query *args:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all --check
+
+# Colour labels by Claude Code subagents: batches, pilot, validate, check, report
+labels *args:
+    cargo run --release -p text2color-train -- labels {{args}}

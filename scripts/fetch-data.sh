@@ -22,6 +22,7 @@ fetch "https://xkcd.com/color/colorsurvey.tar.gz" colorsurvey.tar.gz
 fetch "https://xkcd.com/color/rgb.txt" xkcd-rgb.txt
 fetch "https://raw.githubusercontent.com/first20hours/google-10000-english/master/20k.txt" google-20k.txt
 fetch "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fr/fr_50k.txt" french-50k.txt
+fetch "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt" english-50k.txt
 
 if [ ! -s mainsurvey_sqldump.txt ]; then
     echo "extracting colorsurvey.tar.gz"

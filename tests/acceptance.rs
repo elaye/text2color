@@ -219,20 +219,13 @@ fn weather_associations() {
         hue_within(word, RED.0, ORANGE.1);
     }
 
+    // Many people picture no colour for "cool", so it only has to stand out from ordinary words.
     for word in ["frais", "cool"] {
-        hue_within(word, 180.0, 280.0);
+        hue_within(word, GREEN.0, 280.0);
+        confident(word, NOT_A_COLOUR);
     }
 
-    for word in [
-        "ensoleillé",
-        "sunny",
-        "pluvieux",
-        "rainy",
-        "chaud",
-        "hot",
-        "frais",
-        "cool",
-    ] {
+    for word in ["ensoleillé", "sunny", "pluvieux", "rainy", "chaud", "hot"] {
         confident(word, GATE);
     }
 }

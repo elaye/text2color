@@ -1,6 +1,7 @@
 //! Raw survey parsing, colour-bin histograms and the derived dataset files.
 
 use crate::bins::{colour_bins, nearest};
+use crate::labels::{Labels, Palette};
 use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -12,10 +13,11 @@ use text2color::text::normalize;
 pub const MAX_TOKENS: usize = 5;
 pub const MAX_CHARS: usize = 40;
 const MIN_COUNT: u32 = 2;
-const WORDS_PER_LANGUAGE: usize = 20_000;
 const SPAM_THRESHOLD: f64 = 0.5;
 /// Answers needed before a string's own histogram is a usable estimate of human agreement.
 pub const RELIABLE_COUNT: u32 = 30;
+/// Pseudo-answers a word's colour label counts for in its target.
+pub const LABEL_STRENGTH: f32 = 20.0;
 
 /// Bin counts of the answers given for one string, sparse and sorted by bin.
 pub type Histogram = Vec<(u16, u32)>;
@@ -111,7 +113,7 @@ pub fn load_translations(path: &Path) -> Result<Vec<(String, String)>> {
 }
 
 /// Words of a frequency list, one per line, optionally followed by a count.
-fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
+pub fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
     Ok(text
@@ -122,8 +124,7 @@ fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Reads the raw dump, word lists and translations, writes `bins.tsv`, `strings.tsv` and
-/// `vocabulary.txt` into `derived`.
+/// Reads the raw dump and translations, writes `bins.tsv` and `strings.tsv` into `derived`.
 pub fn prepare(raw: &Path, translations: &Path, bins: usize, derived: &Path) -> Result<()> {
     let dump = File::open(raw.join("mainsurvey_sqldump.txt")).context("open survey dump")?;
     let mut users: HashMap<u32, bool> = HashMap::new();
@@ -251,23 +252,6 @@ pub fn prepare(raw: &Path, translations: &Path, bins: usize, derived: &Path) -> 
 
     println!("strings (n >= {MIN_COUNT}): {}", rows.len());
 
-    // Frequent words the survey has no answers for. Interleaved by rank so that any prefix of
-    // the list is bilingual.
-    let english = word_list(&raw.join("google-20k.txt"), WORDS_PER_LANGUAGE)?;
-    let french = word_list(&raw.join("french-50k.txt"), WORDS_PER_LANGUAGE)?;
-    let mut vocabulary = BufWriter::new(File::create(derived.join("vocabulary.txt"))?);
-    let mut seen = HashSet::new();
-
-    for i in 0..english.len().max(french.len()) {
-        for word in english.get(i).into_iter().chain(french.get(i)) {
-            if !ids.contains_key(word) && seen.insert(word.clone()) {
-                writeln!(vocabulary, "{word}")?;
-            }
-        }
-    }
-
-    println!("vocabulary without answers: {}", seen.len());
-
     Ok(())
 }
 
@@ -290,15 +274,35 @@ pub struct Derived {
     pub prior: Vec<f32>,
     /// Survey strings with their answers.
     pub strings: Vec<Observed>,
-    /// Frequent words without answers.
+    /// Labelled words without survey answers, most frequent first.
     pub vocabulary: Vec<String>,
+    pub labels: Option<Labels>,
 }
 
 impl Derived {
-    /// Target distribution for `hist`: its answers plus `alpha` pseudo-answers spread like the
-    /// prior, normalised. With no answers it is the prior itself.
-    pub fn target(&self, hist: &Histogram, alpha: f32) -> Vec<f32> {
+    /// The answers in `hist` as a distribution.
+    pub fn answers(&self, hist: &[(u16, u32)]) -> Vec<f32> {
+        self.target("", hist, 0.0)
+    }
+
+    /// Pseudo-answers behind the target of `text` besides its survey answers.
+    pub fn pseudo_count(&self, text: &str, alpha: f32) -> f32 {
+        let labelled = self.labels.as_ref().is_some_and(|l| l.contains(text));
+
+        alpha + if labelled { LABEL_STRENGTH } else { 0.0 }
+    }
+
+    /// Target distribution for `text`: its survey answers, plus [`LABEL_STRENGTH`] pseudo-answers
+    /// spread like its calibrated label if it has one, plus `alpha` pseudo-answers spread like
+    /// the prior, normalised.
+    pub fn target(&self, text: &str, hist: &[(u16, u32)], alpha: f32) -> Vec<f32> {
         let mut t: Vec<f32> = self.prior.iter().map(|p| alpha * p).collect();
+
+        if let Some(label) = self.labels.as_ref().and_then(|l| l.distribution(text)) {
+            for (t, q) in t.iter_mut().zip(label) {
+                *t += LABEL_STRENGTH * q;
+            }
+        }
 
         for &(bin, n) in hist {
             t[bin as usize] += n as f32;
@@ -321,7 +325,9 @@ fn parse_histogram(field: &str) -> Result<Histogram> {
         .collect()
 }
 
-pub fn load_derived(derived: &Path) -> Result<Derived> {
+/// Loads the prepared survey data and, if `labels` is given, the colour labels of words, whose
+/// calibration is fitted on the survey strings they share.
+pub fn load_derived(derived: &Path, labels: Option<(&Path, &Palette)>) -> Result<Derived> {
     let mut centroids = Vec::new();
     let mut prior = Vec::new();
 
@@ -357,17 +363,23 @@ pub fn load_derived(derived: &Path) -> Result<Derived> {
         });
     }
 
-    let vocabulary: Vec<String> = fs::read_to_string(derived.join("vocabulary.txt"))
-        .context("read vocabulary.txt")?
-        .lines()
-        .map(str::to_string)
-        .collect();
+    let labels = labels
+        .map(|(path, palette)| Labels::load(path, palette, &strings, &prior))
+        .transpose()?;
+    let answered: HashSet<&str> = strings.iter().map(|s| s.text.as_str()).collect();
+    let vocabulary = labels.as_ref().map_or_else(Vec::new, |l| {
+        l.words()
+            .filter(|w| !answered.contains(w))
+            .map(str::to_string)
+            .collect()
+    });
 
     Ok(Derived {
         centroids,
         prior,
         strings,
         vocabulary,
+        labels,
     })
 }
 
@@ -464,9 +476,10 @@ mod tests {
             prior: vec![0.5, 0.5],
             strings: Vec::new(),
             vocabulary: Vec::new(),
+            labels: None,
         };
 
-        assert_eq!(d.target(&vec![], 2.0), vec![0.5, 0.5]);
-        assert_eq!(d.target(&vec![(0, 8)], 2.0), vec![0.9, 0.1]);
+        assert_eq!(d.target("", &[], 2.0), vec![0.5, 0.5]);
+        assert_eq!(d.target("", &[(0, 8)], 2.0), vec![0.9, 0.1]);
     }
 }

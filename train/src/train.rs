@@ -116,7 +116,7 @@ fn targets(d: &Derived, examples: &[(&Example, f32)], alpha: f32, device: &Devic
     let mut weight = Vec::with_capacity(n);
 
     for (e, keep) in examples {
-        let t = d.target(&e.hist, alpha);
+        let t = d.target(&e.text, &e.hist, alpha);
 
         dist.extend(
             t.iter()
@@ -125,7 +125,7 @@ fn targets(d: &Derived, examples: &[(&Example, f32)], alpha: f32, device: &Devic
         );
         // Between weighting each string equally and each answer equally: a bare "blue" with
         // 270k answers must outweigh the many phrases that share its n-grams.
-        weight.push((1.0 + e.count() as f32 + alpha).sqrt());
+        weight.push((1.0 + e.count() as f32 + d.pseudo_count(&e.text, alpha)).sqrt());
     }
 
     let total: f32 = weight.iter().sum();
@@ -145,7 +145,7 @@ fn loss(logits: Tensor<2>, t: &Targets) -> Tensor<1> {
 }
 
 /// Mean Oklab error on hold-out strings whose target is confident, and AUC of the predicted
-/// confidence for those strings against unanswered ones.
+/// confidence for those strings against strings without survey answers whose target is not.
 pub fn evaluate(model: &Model, d: &Derived, holdout: &[Example], alpha: f32) -> (f32, f32) {
     let mut err_sum = 0f32;
     let mut err_n = 0;
@@ -155,17 +155,14 @@ pub fn evaluate(model: &Model, d: &Derived, holdout: &[Example], alpha: f32) -> 
         let texts: Vec<&str> = chunk.iter().map(|e| e.text.as_str()).collect();
 
         for (e, p) in chunk.iter().zip(model.predict_many(&texts)) {
-            if e.hist.is_empty() {
-                scored.push((p.confidence, false));
-                continue;
-            }
-
-            let (colour, confidence) = model.readout().read(&d.target(&e.hist, alpha));
+            let (colour, confidence) = model.readout().read(&d.target(&e.text, &e.hist, alpha));
 
             if confidence > 0.5 {
                 err_sum += delta_e(p.oklab, colour);
                 err_n += 1;
                 scored.push((p.confidence, true));
+            } else if e.hist.is_empty() {
+                scored.push((p.confidence, false));
             }
         }
     }
@@ -187,7 +184,7 @@ pub fn fit_temperature(model: &Model, d: &Derived) -> f32 {
         .flat_map(|chunk| model.logits(chunk))
         .map(Option::unwrap_or_default)
         .collect();
-    let answers: Vec<Vec<f32>> = rows.iter().map(|s| d.target(&s.hist, 0.0)).collect();
+    let answers: Vec<Vec<f32>> = rows.iter().map(|s| d.answers(&s.hist)).collect();
     let cross_entropy = |t: f32| -> f64 {
         logits
             .iter()

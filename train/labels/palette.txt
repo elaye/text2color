@@ -1,0 +1,199 @@
+# Colour names a label may use. Each is a name from the xkcd survey with at least 100 answers,
+# so a label maps to the colours people actually picked for that name.
+
+# Whites, greys and blacks
+white
+off white
+cream
+ivory
+eggshell
+silver
+light grey
+grey
+medium grey
+warm grey
+dark grey
+slate grey
+steel grey
+blue grey
+gunmetal
+charcoal
+black
+
+# Browns, tans and skin
+beige
+ecru
+light tan
+tan
+khaki
+sand
+wheat
+flesh
+peach
+light brown
+brown
+dark brown
+chocolate
+coffee
+caramel
+chestnut
+reddish brown
+rust
+terracotta
+clay
+mud
+sienna
+copper
+bronze
+taupe
+ochre
+mustard
+
+# Reds
+red
+bright red
+dark red
+blood red
+cherry red
+crimson
+scarlet
+brick red
+maroon
+burgundy
+wine
+
+# Pinks
+pink
+light pink
+pale pink
+baby pink
+bubblegum pink
+hot pink
+bright pink
+dark pink
+rose pink
+dusty rose
+blush
+salmon
+coral
+raspberry
+magenta
+fuchsia
+
+# Oranges
+orange
+light orange
+dark orange
+burnt orange
+red orange
+pumpkin
+tangerine
+amber
+
+# Yellows and golds
+yellow
+pale yellow
+light yellow
+butter
+lemon yellow
+neon yellow
+sunflower
+dark yellow
+dirty yellow
+mustard yellow
+goldenrod
+gold
+dark gold
+
+# Greens
+green
+light green
+pale green
+mint green
+mint
+pastel green
+bright green
+neon green
+lime green
+lime
+chartreuse
+yellow green
+apple green
+grass green
+kelly green
+spring green
+leaf green
+pea green
+olive
+olive green
+dark olive
+army green
+moss green
+sage
+grey green
+sea green
+seafoam green
+jade
+forest green
+hunter green
+pine green
+dark green
+very dark green
+
+# Teals and cyans
+teal
+light teal
+dark teal
+turquoise
+light turquoise
+dark turquoise
+aqua
+aquamarine
+cyan
+
+# Blues
+blue
+light blue
+pale blue
+baby blue
+powder blue
+ice blue
+sky blue
+bright blue
+electric blue
+cerulean
+azure
+ocean blue
+sea blue
+cornflower blue
+periwinkle
+steel blue
+slate blue
+grey blue
+medium blue
+royal blue
+cobalt blue
+dark blue
+navy blue
+midnight blue
+very dark blue
+
+# Purples
+lavender
+lilac
+pale purple
+light purple
+mauve
+orchid
+purple
+bright purple
+blue purple
+pinkish purple
+reddish purple
+grey purple
+plum
+royal purple
+deep purple
+dark purple
+indigo
+eggplant

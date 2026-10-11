@@ -56,7 +56,7 @@ fn distributions(model: &Model, texts: &[&str]) -> Vec<Vec<f32>> {
 }
 
 fn normalised(d: &Derived, hist: &crate::data::Histogram) -> Vec<f32> {
-    d.target(hist, 0.0)
+    d.answers(hist)
 }
 
 /// Predicted confidence against the agreement measured from the answers themselves, on
@@ -264,7 +264,7 @@ pub fn report(
     let mut scored = Vec::new();
 
     for s in d.strings.iter().filter(|s| is_holdout(&s.text)) {
-        let (colour, confidence) = model.readout().read(&d.target(&s.hist, alpha));
+        let (colour, confidence) = model.readout().read(&d.target(&s.text, &s.hist, alpha));
 
         if confidence > 0.5 {
             let p = model.predict(&s.text);
@@ -275,29 +275,52 @@ pub fn report(
         }
     }
 
-    let unanswered: Vec<&str> = d
+    // Labelled words without survey answers: the model against the word's own target.
+    let words: Vec<&str> = d
         .vocabulary
         .iter()
         .filter(|w| is_holdout(w))
         .map(String::as_str)
         .collect();
-    let unanswered = model.predict_many(&unanswered);
-    let passing = unanswered.iter().filter(|p| p.confidence >= 0.5).count();
+    let mut word_de = Vec::new();
+    let (mut colour_words, mut plain_words, mut passing, mut gate_agrees) = (0, 0, 0, 0);
 
-    scored.extend(unanswered.iter().map(|p| (p.confidence, false)));
+    for (w, p) in words.iter().zip(model.predict_many(&words)) {
+        let (colour, confidence) = model.readout().read(&d.target(w, &[], alpha));
+        let target_passes = confidence >= 0.5;
+
+        gate_agrees += usize::from(target_passes == (p.confidence >= 0.5));
+
+        if target_passes {
+            colour_words += 1;
+            word_de.push(delta_e(p.oklab, colour));
+            scored.push((p.confidence, true));
+        } else {
+            plain_words += 1;
+            passing += usize::from(p.confidence >= 0.5);
+            scored.push((p.confidence, false));
+        }
+    }
+
+    word_de.sort_by(f32::total_cmp);
 
     println!(
-        "holdout confident strings: {err_n}, mean dE {:.4}",
+        "holdout confident survey strings: {err_n}, mean dE {:.4}",
         err_sum / err_n.max(1) as f32
     );
     println!(
-        "confidence AUC (holdout confident strings vs unanswered words): {:.4}",
+        "holdout labelled words: {} ({colour_words} with a confident target), gate agrees with the target {:.1}%, colour dE median {:.4}",
+        words.len(),
+        100.0 * gate_agrees as f32 / words.len().max(1) as f32,
+        word_de.get(word_de.len() / 2).copied().unwrap_or(f32::NAN)
+    );
+    println!(
+        "confidence AUC (confident targets vs words whose target is not): {:.4}",
         auc(&mut scored)
     );
     println!(
-        "holdout unanswered words at confidence >= 0.5: {passing}/{} ({:.2}%)",
-        unanswered.len(),
-        100.0 * passing as f32 / unanswered.len().max(1) as f32
+        "holdout words whose target is not confident at confidence >= 0.5: {passing}/{plain_words} ({:.2}%)",
+        100.0 * passing as f32 / plain_words.max(1) as f32
     );
 
     reliability_report(model, d);
