@@ -1,0 +1,15 @@
+[package]
+name = "text2color-train"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+text2color = { path = ".." }
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "autodiff", "optim", "store"] }
+rand = "0.10"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[features]
+cuda = ["burn/cuda"]

@@ -1,0 +1,19 @@
+[workspace]
+members = [".", "train"]
+resolver = "3"
+
+[package]
+name = "text2color"
+version = "0.1.0"
+edition = "2024"
+description = "Map a word or short phrase to a color, with a confidence score. Small enough for a Raspberry Pi."
+license = "MIT"
+include = ["src/**", "model/text2color.bpk", "model/text2color.cfg", "README.md", "LICENSE"]
+
+[dependencies]
+palette = { version = "0.7", default-features = false, features = ["std"] }
+burn = { version = "0.22", default-features = false, features = ["std", "flex", "store"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
