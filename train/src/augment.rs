@@ -1,7 +1,9 @@
-//! Data augmentation: typos and noise words. Shared by training and evaluation.
+//! Data augmentation: typos, noise words and accent stripping. Shared by training and evaluation.
 
 use rand::seq::IndexedRandom;
 use rand::{Rng, RngExt};
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 
 const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 
@@ -43,6 +45,25 @@ pub fn typo<R: Rng>(text: &str, rng: &mut R) -> String {
         .join(" ")
 }
 
+/// Removes diacritics and expands ligatures, as people often type French without them.
+pub fn strip_accents(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+
+    for ch in text.nfd().filter(|c| !is_combining_mark(*c)) {
+        match ch {
+            'œ' => out.push_str("oe"),
+            'æ' => out.push_str("ae"),
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
 /// Prepends or appends a noise word.
 pub fn with_noise<R: Rng>(text: &str, noise: &str, rng: &mut R) -> String {
     if rng.random_bool(0.5) {
@@ -69,5 +90,13 @@ mod tests {
             .count();
 
         assert!(changed >= 15);
+    }
+
+    #[test]
+    fn strips_french_accents() {
+        assert_eq!(strip_accents("vert foncé"), "vert fonce");
+        assert_eq!(strip_accents("bleu œuf de merle"), "bleu oeuf de merle");
+        assert_eq!(strip_accents("rose pâle"), "rose pale");
+        assert_eq!(strip_accents("plain"), "plain");
     }
 }

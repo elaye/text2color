@@ -1,6 +1,6 @@
 //! Training loop.
 
-use crate::augment::{typo, with_noise};
+use crate::augment::{strip_accents, typo, with_noise};
 use crate::data::{ConfidenceMap, Derived, is_holdout};
 use anyhow::Result;
 use burn::optim::{AdamWConfig, GradientsParams};
@@ -27,6 +27,7 @@ pub struct Config {
     pub pair_fraction: f32,
     pub typo_p: f64,
     pub noise_p: f64,
+    pub accent_p: f64,
     pub seed: u64,
 }
 
@@ -86,6 +87,10 @@ pub fn build_examples(d: &Derived, cfg: &Config, rng: &mut StdRng) -> Split {
 fn augment(e: &Example, noise_words: &[String], cfg: &Config, rng: &mut StdRng) -> (String, f32) {
     let mut text = e.text.clone();
     let mut confidence = e.confidence;
+
+    if !text.is_ascii() && rng.random_bool(cfg.accent_p) {
+        text = strip_accents(&text);
+    }
 
     if rng.random_bool(cfg.typo_p) {
         let typed = typo(&text, rng);

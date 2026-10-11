@@ -157,3 +157,35 @@ fn hex_formatting() {
     assert_eq!(p.hex().len(), 7);
     assert!(p.hex().starts_with('#'));
 }
+
+#[test]
+fn french_color_terms() {
+    hue_within("rouge", RED.0, RED.1);
+    hue_within("jaune", YELLOW.0, YELLOW.1);
+    hue_within("vert", GREEN.0, GREEN.1);
+    hue_within("bleu", BLUE.0, BLUE.1);
+    hue_within("violet", PURPLE.0, PURPLE.1);
+    hue_within("rose", PINK.0, PINK.1);
+    same_hue("vert foncé", "dark green", 30.0);
+    same_hue("vert fonce", "vert foncé", 15.0);
+    same_hue("bleu marine", "navy blue", 30.0);
+
+    for word in ["rouge", "jaune", "vert", "bleu", "noir", "blanc", "gris"] {
+        confident(word, 0.7);
+    }
+
+    assert!(predict("noir").oklab[0] < 0.35);
+    assert!(predict("blanc").oklab[0] > 0.85);
+    assert!(predict("bleu foncé").oklab[0] < predict("bleu clair").oklab[0]);
+}
+
+#[test]
+fn french_associations_and_rejections() {
+    hue_within("herbe", GREEN.0, GREEN.1);
+    hue_within("sang", RED.0, RED.1);
+    hue_within("citron", YELLOW.0, YELLOW.1);
+
+    for text in ["lundi", "demain", "la réunion de demain au bureau"] {
+        unconfident(text, 0.2);
+    }
+}

@@ -1,7 +1,7 @@
 //! Evaluation of an exported model through the library's inference path.
 
-use crate::augment::typo;
-use crate::data::{ConfidenceMap, Derived, is_holdout, load_xkcd};
+use crate::augment::{strip_accents, typo};
+use crate::data::{ConfidenceMap, Derived, is_holdout, load_translations, load_xkcd};
 use crate::train::auc;
 use anyhow::Result;
 use rand::SeedableRng;
@@ -50,6 +50,24 @@ pub const PROBES: &[&str] = &[
     "the color red",
     "blue green",
     "teal",
+    "rouge",
+    "vert",
+    "jaune",
+    "violet",
+    "marron",
+    "gris",
+    "bleu clair",
+    "vert foncé",
+    "vert fonce",
+    "rose pâle",
+    "bleu marine",
+    "ciel",
+    "herbe",
+    "sang",
+    "citron",
+    "chocolat",
+    "lundi",
+    "voiture bleue",
     "",
 ];
 
@@ -155,7 +173,45 @@ fn css_report(model: &Model, d: &Derived) {
     }
 }
 
-pub fn report(model: &Model, d: &Derived, raw: &Path, map: ConfidenceMap) -> Result<()> {
+/// Error of the French translations of the xkcd names, with and without accents.
+fn french_report(model: &Model, xkcd: &[(String, [u8; 3])], translations: &Path) -> Result<()> {
+    let table: HashMap<String, String> = load_translations(translations)?.into_iter().collect();
+    let mut accented = Vec::new();
+    let mut plain = Vec::new();
+
+    for (name, rgb) in xkcd {
+        let Some(fr) = table.get(name) else {
+            continue;
+        };
+        let target = rgb_to_oklab(*rgb);
+
+        accented.push(delta_e(model.predict(fr).oklab, target));
+        plain.push(delta_e(model.predict(&strip_accents(fr)).oklab, target));
+    }
+
+    accented.sort_by(f32::total_cmp);
+    plain.sort_by(f32::total_cmp);
+
+    let n = accented.len();
+
+    println!(
+        "xkcd names in french ({n}): median dE {:.4}, p90 {:.4}; without accents median {:.4}, p90 {:.4}",
+        accented[n / 2],
+        accented[n * 9 / 10],
+        plain[n / 2],
+        plain[n * 9 / 10]
+    );
+
+    Ok(())
+}
+
+pub fn report(
+    model: &Model,
+    d: &Derived,
+    raw: &Path,
+    translations: &Path,
+    map: ConfidenceMap,
+) -> Result<()> {
     let mut err_sum = 0f32;
     let mut err_n = 0;
     let mut scored = Vec::new();
@@ -197,6 +253,7 @@ pub fn report(model: &Model, d: &Derived, raw: &Path, map: ConfidenceMap) -> Res
         errs[errs.len() * 9 / 10]
     );
 
+    french_report(model, &xkcd, translations)?;
     css_report(model, d);
 
     let mut rng = StdRng::seed_from_u64(7);

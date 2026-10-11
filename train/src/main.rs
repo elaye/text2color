@@ -17,6 +17,9 @@ struct Cli {
     raw: PathBuf,
     #[arg(long, default_value = "data/derived")]
     derived: PathBuf,
+    /// `english<TAB>french` pairs applied to the survey strings
+    #[arg(long, default_value = "train/translations/en-fr.tsv")]
+    translations: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -65,6 +68,9 @@ struct TrainArgs {
     typo_p: f64,
     #[arg(long, default_value_t = 0.15)]
     noise_p: f64,
+    /// Probability of dropping accents from a training example
+    #[arg(long, default_value_t = 0.5)]
+    accent_p: f64,
     #[arg(long, default_value_t = 42)]
     seed: u64,
     #[arg(long)]
@@ -90,7 +96,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Prepare => data::prepare(&cli.raw, &cli.derived),
+        Cmd::Prepare => data::prepare(&cli.raw, &cli.translations, &cli.derived),
         Cmd::Train(a) => {
             let d = data::load_derived(&cli.derived)?;
             let cfg = train::Config {
@@ -108,6 +114,7 @@ fn main() -> Result<()> {
                 pair_fraction: a.pair_fraction,
                 typo_p: a.typo_p,
                 noise_p: a.noise_p,
+                accent_p: a.accent_p,
                 seed: a.seed,
             };
             let dev = device(a.cuda)?;
@@ -133,7 +140,7 @@ fn main() -> Result<()> {
             let m = load_model(&model)?;
             let d = data::load_derived(&cli.derived)?;
 
-            eval::report(&m, &d, &cli.raw, confidence.map())
+            eval::report(&m, &d, &cli.raw, &cli.translations, confidence.map())
         }
     }
 }

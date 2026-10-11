@@ -1,7 +1,7 @@
 //! Raw survey parsing, aggregation and the derived dataset files.
 
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -11,6 +11,7 @@ use text2color::text::normalize;
 pub const MAX_TOKENS: usize = 5;
 pub const MAX_CHARS: usize = 40;
 const MIN_COUNT: u32 = 2;
+const WORDS_PER_LANGUAGE: usize = 20_000;
 const SPAM_THRESHOLD: f64 = 0.5;
 /// RGB is binned into 2^CELL_BITS steps per channel to estimate how dominant a name is per cell.
 const CELL_BITS: u32 = 4;
@@ -24,7 +25,7 @@ const DOMINANCE_GAMMA: i32 = 4;
 /// each answer by a power of how dominant its name is in that swatch's cell moves the estimate
 /// toward the color where the name is most probable, and reduces to the plain mean for strings
 /// whose answers are spread one per cell.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Agg {
     n: u32,
     sum: [f64; 3],
@@ -43,6 +44,17 @@ impl Agg {
             self.sum[i] += v;
             self.sumsq[i] += v * v;
             self.wsum_lab[i] += weight * v;
+        }
+    }
+
+    fn merge(&mut self, other: &Agg) {
+        self.n += other.n;
+        self.wsum += other.wsum;
+
+        for i in 0..3 {
+            self.sum[i] += other.sum[i];
+            self.sumsq[i] += other.sumsq[i];
+            self.wsum_lab[i] += other.wsum_lab[i];
         }
     }
 
@@ -121,8 +133,43 @@ pub fn canonical(text: &str) -> Option<String> {
     (joined.chars().count() <= MAX_CHARS).then_some(joined)
 }
 
-/// Reads the raw dump and word list, writes `positives.tsv` and `negatives.txt` into `derived`.
-pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
+/// Reads `english<TAB>french` pairs. Lines starting with `#` and pairs with an empty or
+/// unusable French side are skipped.
+pub fn load_translations(path: &Path) -> Result<Vec<(String, String)>> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut out = Vec::new();
+
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let Some((en, fr)) = line.split_once('\t') else {
+            continue;
+        };
+        let (Some(en), Some(fr)) = (canonical(en), canonical(fr)) else {
+            continue;
+        };
+
+        if en != fr {
+            out.push((en, fr));
+        }
+    }
+
+    Ok(out)
+}
+
+/// Words of a frequency list, one per line, optionally followed by a count.
+fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+
+    Ok(text
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(canonical)
+        .take(limit)
+        .collect())
+}
+
+/// Reads the raw dump, word lists and translations, writes `positives.tsv` and `negatives.txt`
+/// into `derived`.
+pub fn prepare(raw: &Path, translations: &Path, derived: &Path) -> Result<()> {
     let dump = File::open(raw.join("mainsurvey_sqldump.txt")).context("open survey dump")?;
     let mut users: HashMap<u32, bool> = HashMap::new();
     let mut ids: HashMap<String, u32> = HashMap::new();
@@ -197,6 +244,27 @@ pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
         sigma_rand
     );
 
+    // A translated string inherits the answers of its English source, on top of any answers
+    // the survey already has for it.
+    let mut translated = 0;
+
+    for (en, fr) in load_translations(translations)? {
+        let Some(&src) = ids.get(&en) else {
+            continue;
+        };
+        let source = aggs[src as usize].clone();
+        let dst = *ids.entry(fr).or_insert_with_key(|k| {
+            names.push(k.clone());
+            aggs.push(Agg::default());
+            names.len() as u32 - 1
+        });
+
+        aggs[dst as usize].merge(&source);
+        translated += 1;
+    }
+
+    println!("translations applied: {translated}");
+
     fs::create_dir_all(derived)?;
 
     let mut rows: Vec<(&String, &Agg)> = names
@@ -225,20 +293,21 @@ pub fn prepare(raw: &Path, derived: &Path) -> Result<()> {
 
     println!("positives (n >= {MIN_COUNT}): {}", rows.len());
 
-    let words = fs::read_to_string(raw.join("google-20k.txt")).context("open word list")?;
+    // Interleaved by rank so that any prefix of the list is bilingual.
+    let english = word_list(&raw.join("google-20k.txt"), WORDS_PER_LANGUAGE)?;
+    let french = word_list(&raw.join("french-50k.txt"), WORDS_PER_LANGUAGE)?;
     let mut negatives = BufWriter::new(File::create(derived.join("negatives.txt"))?);
-    let mut kept = 0;
+    let mut seen = HashSet::new();
 
-    for word in words.lines() {
-        let Some(key) = canonical(word) else { continue };
-
-        if !ids.contains_key(&key) {
-            writeln!(negatives, "{key}")?;
-            kept += 1;
+    for i in 0..english.len().max(french.len()) {
+        for word in english.get(i).into_iter().chain(french.get(i)) {
+            if !ids.contains_key(word) && seen.insert(word.clone()) {
+                writeln!(negatives, "{word}")?;
+            }
         }
     }
 
-    println!("negatives: {kept}");
+    println!("negatives: {}", seen.len());
 
     Ok(())
 }

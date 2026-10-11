@@ -1,7 +1,7 @@
 # text2color
 
-Map a word or short phrase to a color, with a confidence score. Small enough for a
-Raspberry Pi: one embedded 8 MB model, a few microseconds per query, no I/O.
+Map an English or French word or short phrase to a color, with a confidence score. Small
+enough for a Raspberry Pi: one embedded 8 MB model, a few microseconds per query, no I/O.
 
 ```rust
 let p = text2color::predict("dark teal");
@@ -16,6 +16,7 @@ bleu    #236dd0  rgb( 35,109,208)  confidence 0.82
 ## What it does
 
 - **Color names and modifiers**: "navy", "pale pink", "neon green", "reddish orange".
+- **French**: "vert foncé", "bleu marine", "rose pâle", "herbe", with or without accents.
 - **Typos**: "bleu", "purpel", "ornage" land on the intended color.
 - **Associations**: "grass", "blood", "sky", "lemon", "chocolate".
 - **Confidence**: how predictable a color is from the text. Near 1 for an unambiguous color
@@ -53,10 +54,16 @@ should. The output is converted to sRGB with [`palette`](https://crates.io/crate
 - The confidence target is a logistic on the string's spread relative to random swatches, plus
   a small term for how often the string was used. Strings everybody agrees on score high;
   "idk" and "ugly" score low.
-- Negatives: words from a 20 k English frequency list that never appear in the survey, with
-  confidence target 0 and no color loss.
-- Augmentation during training: random typos (keep the color, confidence × 0.9) and noise
-  words prepended or appended (keep the color, confidence × 0.7).
+- French: `train/translations/en-fr.tsv` holds machine translations of the 4000 most-answered
+  survey strings. Each French string inherits the answers of its English source, merged with
+  any answers it already had (the survey contains some French, "bleu" and "rouge" among them).
+  Several English strings can map to one French string ("grey" and "gray" both give "gris").
+  Strings spelled the same in both languages, such as "violet", share one row.
+- Negatives: the top 20 k words of an English and of a French frequency list that never appear
+  among the positives, with confidence target 0 and no color loss.
+- Augmentation during training: accents dropped on half the accented examples, random typos
+  (keep the color, confidence × 0.9) and noise words prepended or appended (keep the color,
+  confidence × 0.7).
 
 The 949-name xkcd list (CC0) and the 148 CSS named colors (from `palette::named`) are used only
 for evaluation. CSS names are split into survey words first ("darkslategray" becomes "dark slate
