@@ -6,6 +6,7 @@ use crate::train::auc;
 use anyhow::Result;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 use text2color::Model;
@@ -66,6 +67,94 @@ pub fn probes(model: &Model) {
     }
 }
 
+/// Splits a concatenated CSS name ("darkslategray") into the most probable sequence of common
+/// survey words under a unigram model. Names that cannot be split are kept whole.
+fn segment(name: &str, words: &HashMap<&str, f64>) -> String {
+    let n = name.len();
+    let mut best: Vec<Option<(f64, usize)>> = vec![None; n + 1];
+    best[0] = Some((0.0, 0));
+
+    for end in 1..=n {
+        for start in 0..end {
+            let (Some((score, _)), Some(&logp)) = (best[start], words.get(&name[start..end]))
+            else {
+                continue;
+            };
+            let score = score + logp;
+
+            if best[end].is_none_or(|(s, _)| score > s) {
+                best[end] = Some((score, start));
+            }
+        }
+    }
+
+    if best[n].is_none() {
+        return name.to_string();
+    }
+
+    let mut parts = Vec::new();
+    let mut end = n;
+
+    while end > 0 {
+        let start = best[end].unwrap().1;
+        parts.push(&name[start..end]);
+        end = start;
+    }
+
+    parts.reverse();
+    parts.join(" ")
+}
+
+/// Error against the 148 CSS named colors, which the model never saw as targets.
+fn css_report(model: &Model, d: &Derived) {
+    let mut counts: HashMap<&str, f64> = HashMap::new();
+
+    for p in &d.positives {
+        for token in p.text.split(' ').filter(|t| t.len() >= 3) {
+            *counts.entry(token).or_default() += p.count as f64;
+        }
+    }
+
+    let total: f64 = counts.values().sum();
+    let words: HashMap<&str, f64> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= 20.0)
+        .map(|(w, c)| (w, (c / total).ln()))
+        .collect();
+    let mut rows: Vec<(String, [u8; 3], text2color::Prediction, f32)> = palette::named::entries()
+        .map(|(name, c)| {
+            let text = segment(name, &words);
+            let p = model.predict(&text);
+            let rgb = [c.red, c.green, c.blue];
+
+            (text, rgb, p, delta_e(p.oklab, rgb_to_oklab(rgb)))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.3.total_cmp(&a.3));
+
+    let errs: Vec<f32> = rows.iter().rev().map(|r| r.3).collect();
+    let close = errs.iter().filter(|&&e| e < 0.1).count();
+
+    println!(
+        "css 148 names: median dE {:.4}, p90 {:.4}, {close} within 0.1",
+        errs[errs.len() / 2],
+        errs[errs.len() * 9 / 10]
+    );
+
+    for (text, css, p, e) in &rows {
+        println!(
+            "  {:<24} {}  css #{:02x}{:02x}{:02x}  dE {:.3}  conf {:.2}",
+            text,
+            p.hex(),
+            css[0],
+            css[1],
+            css[2],
+            e,
+            p.confidence
+        );
+    }
+}
+
 pub fn report(model: &Model, d: &Derived, raw: &Path, map: ConfidenceMap) -> Result<()> {
     let mut err_sum = 0f32;
     let mut err_n = 0;
@@ -107,6 +196,8 @@ pub fn report(model: &Model, d: &Derived, raw: &Path, map: ConfidenceMap) -> Res
         errs[errs.len() / 2],
         errs[errs.len() * 9 / 10]
     );
+
+    css_report(model, d);
 
     let mut rng = StdRng::seed_from_u64(7);
     let mut robust = 0;

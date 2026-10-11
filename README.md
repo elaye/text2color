@@ -58,8 +58,10 @@ should. The output is converted to sRGB with [`palette`](https://crates.io/crate
 - Augmentation during training: random typos (keep the color, confidence × 0.9) and noise
   words prepended or appended (keep the color, confidence × 0.7).
 
-The 949-name xkcd list (CC0) is used only for evaluation. The raw survey dump is published by
-xkcd without an explicit licence statement; only learned weights ship in this crate.
+The 949-name xkcd list (CC0) and the 148 CSS named colors (from `palette::named`) are used only
+for evaluation. CSS names are split into survey words first ("darkslategray" becomes "dark slate
+gray"). The raw survey dump is published by xkcd without an explicit licence statement; only
+learned weights ship in this crate.
 
 ## Numbers
 
@@ -69,6 +71,7 @@ From `just eval` on the shipped model (x86_64 desktop, single thread):
 |---|---|
 | hold-out mean Oklab error (confident strings) | 0.082 |
 | xkcd 949 names, median / p90 Oklab error | 0.040 / 0.089 |
+| CSS 148 named colors (unseen), median / p90 Oklab error | 0.093 / 0.220 |
 | confidence AUC, color strings vs non-words | 0.987 |
 | typo robustness (one random edit keeps the color) | 78.6 % |
 | latency per query | 3 µs |
