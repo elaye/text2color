@@ -9,11 +9,11 @@ fetch:
 prepare:
     cargo run --release -p text2color-train -- prepare
 
-# Train and export model/text2color.bin
+# Train and export model/text2color.bpk (+ .cfg sidecar)
 train *args:
     cargo run --release -p text2color-train -- train {{args}}
 
-# Evaluate model/text2color.bin through the library inference path
+# Evaluate model/text2color.bpk through the library inference path
 eval *args:
     cargo run --release -p text2color-train -- eval {{args}}
 
