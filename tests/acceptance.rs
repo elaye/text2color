@@ -53,6 +53,11 @@ fn same_hue(a: &str, b: &str, tolerance: f32) {
     );
 }
 
+// Confidence is the share of people who would pick a colour close to the prediction. Callers
+// trust it from 0.5; a prediction carrying no information still scores about 0.2.
+const GATE: f32 = 0.5;
+const NOT_A_COLOUR: f32 = 0.35;
+
 // Approximate Oklab hue sectors, in degrees.
 const RED: (f32, f32) = (10.0, 45.0);
 const ORANGE: (f32, f32) = (45.0, 75.0);
@@ -76,7 +81,7 @@ fn basic_color_terms() {
         "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white",
         "grey", "gray",
     ] {
-        confident(word, 0.8);
+        confident(word, GATE);
     }
 
     assert!(predict("black").oklab[0] < 0.35);
@@ -93,7 +98,7 @@ fn typos_keep_the_hue() {
     same_hue("ornage", "orange", 25.0);
 
     for word in ["bleu", "gren", "purpel", "yelow", "ornage"] {
-        confident(word, 0.5);
+        confident(word, GATE);
     }
 }
 
@@ -121,7 +126,7 @@ fn common_associations() {
     assert!(predict("chocolate").oklab[0] < 0.5);
 
     for word in ["sky", "grass", "blood", "lemon", "chocolate"] {
-        confident(word, 0.4);
+        confident(word, GATE);
     }
 }
 
@@ -136,7 +141,7 @@ fn non_colors_are_rejected() {
         "   ",
         "meeting at the office tomorrow",
     ] {
-        unconfident(text, 0.2);
+        unconfident(text, NOT_A_COLOUR);
     }
 }
 
@@ -147,7 +152,6 @@ fn noise_words_are_tolerated() {
 
     assert!(text2color::color::delta_e(bare.oklab, noisy.oklab) < 0.1);
     same_hue("blue car", "blue", 30.0);
-    assert!(predict("blue car").confidence < predict("blue").confidence);
 }
 
 #[test]
@@ -171,7 +175,7 @@ fn french_color_terms() {
     same_hue("bleu marine", "navy blue", 30.0);
 
     for word in ["rouge", "jaune", "vert", "bleu", "noir", "blanc", "gris"] {
-        confident(word, 0.7);
+        confident(word, GATE);
     }
 
     assert!(predict("noir").oklab[0] < 0.35);
@@ -186,7 +190,7 @@ fn french_associations_and_rejections() {
     hue_within("citron", YELLOW.0, YELLOW.1);
 
     for text in ["lundi", "demain", "la réunion de demain au bureau"] {
-        unconfident(text, 0.2);
+        unconfident(text, NOT_A_COLOUR);
     }
 }
 
@@ -229,7 +233,7 @@ fn weather_associations() {
         "frais",
         "cool",
     ] {
-        confident(word, 0.5);
+        confident(word, GATE);
     }
 }
 
@@ -238,6 +242,6 @@ fn everyday_words_stay_below_the_gate() {
     for word in [
         "famille", "amour", "graine", "horloge", "family", "love", "seed", "clock",
     ] {
-        unconfident(word, 0.5);
+        unconfident(word, GATE);
     }
 }

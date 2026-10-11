@@ -12,6 +12,9 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 palette = { version = "0.7", default-features = false, features = ["std", "named"] }
 unicode-normalization = "0.1"
+linfa = "0.8.1"
+linfa-clustering = "0.8.1"
+ndarray = "0.16"
 
 [features]
 cuda = ["burn/cuda"]

@@ -1,0 +1,140 @@
+red
+green
+blue
+yellow
+orange
+purple
+pink
+brown
+black
+white
+grey
+bleu
+gren
+purpel
+yelow
+ornage
+dark blue
+light blue
+pale pink
+hot pink
+neon green
+sky
+grass
+blood
+lemon
+chocolate
+ocean
+sunset
+table
+monday
+running
+asdfgh
+a dark blue
+blue car
+the color red
+blue green
+teal
+rouge
+vert
+jaune
+violet
+marron
+gris
+bleu clair
+vert foncé
+vert fonce
+rose pâle
+bleu marine
+ciel
+herbe
+sang
+citron
+chocolat
+lundi
+voiture bleue
+ensoleillé
+ensoleille
+ensoleillée
+nuageux
+pluvieux
+pluvieuses
+orageux
+brumeux
+neigeux
+venteux
+chaud
+froid
+frais
+doux
+sombre
+lumineux
+pluie
+neige
+orage
+brouillard
+canicule
+tempête
+arc-en-ciel
+soleil
+forêt
+clair
+sunny
+sunnier
+cloudy
+rainy
+stormy
+foggy
+misty
+snowy
+windy
+hot
+warm
+cold
+cool
+mild
+dark
+darker
+bright
+rain
+snow
+storm
+fog
+heatwave
+rainbow
+sun
+mer
+sea
+feu
+fire
+nuit
+night
+glace
+ice
+cendre
+ash
+ashy
+rouille
+rust
+rusty
+sable
+sand
+sandy
+charbon
+coal
+bleue
+vertes
+blanc
+doré
+dore
+écarlate
+ecarlate
+bleu ciel
+famille
+amour
+graine
+horloge
+family
+love
+seed
+clock

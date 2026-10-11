@@ -2,9 +2,6 @@
 
 use palette::{Clamp, FromColor, IntoColor, Oklab, Srgb};
 
-/// Multiplier applied to Oklab a/b so all three regression targets are roughly unit range.
-pub const AB_SCALE: f32 = 3.0;
-
 /// Converts 8-bit sRGB to Oklab `[L, a, b]`.
 pub fn rgb_to_oklab(rgb: [u8; 3]) -> [f32; 3] {
     let lab: Oklab = Srgb::new(rgb[0], rgb[1], rgb[2])

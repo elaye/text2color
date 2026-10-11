@@ -1,6 +1,6 @@
-//! Raw survey parsing, aggregation and the derived dataset files.
+//! Raw survey parsing, colour-bin histograms and the derived dataset files.
 
-use crate::augment::base_forms;
+use crate::bins::{colour_bins, nearest};
 use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -14,75 +14,26 @@ pub const MAX_CHARS: usize = 40;
 const MIN_COUNT: u32 = 2;
 const WORDS_PER_LANGUAGE: usize = 20_000;
 const SPAM_THRESHOLD: f64 = 0.5;
-/// RGB is binned into 2^CELL_BITS steps per channel to estimate how dominant a name is per cell.
-const CELL_BITS: u32 = 4;
-/// Exponent on the dominance weight; 1 is a soft centroid, large values approach the argmax cell.
-const DOMINANCE_GAMMA: i32 = 4;
-/// Survey strings with at least this many answers count as colour words whose inflections are
-/// kept out of the negatives.
-const COLOUR_WORD_COUNT: u32 = 20;
+/// Answers needed before a string's own histogram is a usable estimate of human agreement.
+pub const RELIABLE_COUNT: u32 = 30;
 
-/// Weighted color mean plus unweighted spread of the answers for one string.
-///
-/// The mean of all swatches given a name is the centroid of the region where the name is used,
-/// which for names at the gamut boundary ("black", "red") lies well inside the gamut. Weighting
-/// each answer by a power of how dominant its name is in that swatch's cell moves the estimate
-/// toward the color where the name is most probable, and reduces to the plain mean for strings
-/// whose answers are spread one per cell.
-#[derive(Default, Clone)]
-struct Agg {
-    n: u32,
-    sum: [f64; 3],
-    sumsq: [f64; 3],
-    wsum: f64,
-    wsum_lab: [f64; 3],
+/// Bin counts of the answers given for one string, sparse and sorted by bin.
+pub type Histogram = Vec<(u16, u32)>;
+
+fn merge(a: &Histogram, b: &Histogram) -> Histogram {
+    let mut counts: HashMap<u16, u32> = a.iter().copied().collect();
+
+    for &(bin, n) in b {
+        *counts.entry(bin).or_default() += n;
+    }
+
+    let mut out: Histogram = counts.into_iter().collect();
+    out.sort_unstable();
+    out
 }
 
-impl Agg {
-    fn push(&mut self, lab: [f32; 3], weight: f64) {
-        self.n += 1;
-        self.wsum += weight;
-
-        for (i, &v) in lab.iter().enumerate() {
-            let v = v as f64;
-            self.sum[i] += v;
-            self.sumsq[i] += v * v;
-            self.wsum_lab[i] += weight * v;
-        }
-    }
-
-    fn merge(&mut self, other: &Agg) {
-        self.n += other.n;
-        self.wsum += other.wsum;
-
-        for i in 0..3 {
-            self.sum[i] += other.sum[i];
-            self.sumsq[i] += other.sumsq[i];
-            self.wsum_lab[i] += other.wsum_lab[i];
-        }
-    }
-
-    fn mean(&self) -> [f64; 3] {
-        self.wsum_lab.map(|s| s / self.wsum)
-    }
-
-    /// Mean squared distance from the unweighted mean, summed over the three axes.
-    fn variance(&self) -> f64 {
-        (0..3)
-            .map(|i| {
-                let m = self.sum[i] / self.n as f64;
-                self.sumsq[i] / self.n as f64 - m * m
-            })
-            .sum::<f64>()
-            .max(0.0)
-    }
-}
-
-fn cell(rgb: [u8; 3]) -> usize {
-    let shift = 8 - CELL_BITS;
-
-    rgb.iter()
-        .fold(0, |acc, &c| (acc << CELL_BITS) | (c >> shift) as usize)
+fn total(h: &Histogram) -> u32 {
+    h.iter().map(|&(_, n)| n).sum()
 }
 
 /// Splits `INSERT INTO "t" VALUES(...)` into table name and the raw value list.
@@ -159,53 +110,6 @@ pub fn load_translations(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-/// One curated concept: its surface forms in both languages, the survey strings giving its
-/// colour, and how broadly speakers agree on that colour.
-struct Concept {
-    forms: Vec<String>,
-    colours: Vec<String>,
-    agreement: f32,
-}
-
-fn split_list(field: &str) -> Vec<String> {
-    field.split(',').filter_map(canonical).collect()
-}
-
-/// Reads `english forms<TAB>french forms<TAB>colours<TAB>agreement` lines.
-fn load_concepts(path: &Path) -> Result<Vec<Concept>> {
-    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let mut out = Vec::new();
-
-    for line in text
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-    {
-        let f: Vec<&str> = line.split('\t').collect();
-
-        if f.len() != 4 {
-            bail!("malformed association row: {line}");
-        }
-
-        let mut forms = split_list(f[0]);
-        forms.extend(split_list(f[1]));
-
-        let colours = split_list(f[2]);
-        let agreement: f32 = f[3].trim().parse()?;
-
-        if forms.is_empty() || colours.is_empty() || !(0.0..=1.0).contains(&agreement) {
-            bail!("incomplete association row: {line}");
-        }
-
-        out.push(Concept {
-            forms,
-            colours,
-            agreement,
-        });
-    }
-
-    Ok(out)
-}
-
 /// Words of a frequency list, one per line, optionally followed by a count.
 fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
@@ -218,9 +122,9 @@ fn word_list(path: &Path, limit: usize) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Reads the raw dump, word lists, translations and associations, writes `positives.tsv`,
-/// `associations.tsv` and `negatives.txt` into `derived`.
-pub fn prepare(raw: &Path, translations: &Path, associations: &Path, derived: &Path) -> Result<()> {
+/// Reads the raw dump, word lists and translations, writes `bins.tsv`, `strings.tsv` and
+/// `vocabulary.txt` into `derived`.
+pub fn prepare(raw: &Path, translations: &Path, bins: usize, derived: &Path) -> Result<()> {
     let dump = File::open(raw.join("mainsurvey_sqldump.txt")).context("open survey dump")?;
     let mut users: HashMap<u32, bool> = HashMap::new();
     let mut ids: HashMap<String, u32> = HashMap::new();
@@ -264,36 +168,34 @@ pub fn prepare(raw: &Path, translations: &Path, associations: &Path, derived: &P
         }
     }
 
-    let mut cell_total = vec![0u32; 1 << (3 * CELL_BITS)];
-    let mut name_cell: HashMap<(u32, u16), u32> = HashMap::new();
-
-    for &(id, rgb) in &answers {
-        let c = cell(rgb);
-        cell_total[c] += 1;
-        *name_cell.entry((id, c as u16)).or_default() += 1;
-    }
-
-    let mut aggs: Vec<Agg> = (0..names.len()).map(|_| Agg::default()).collect();
-    let mut global = Agg::default();
-
-    for &(id, rgb) in &answers {
-        let c = cell(rgb);
-        let weight =
-            (name_cell[&(id, c as u16)] as f64 / cell_total[c] as f64).powi(DOMINANCE_GAMMA);
-        let lab = rgb_to_oklab(rgb);
-
-        global.push(lab, 1.0);
-        aggs[id as usize].push(lab, weight);
-    }
-
-    let sigma_rand = global.variance().sqrt();
     println!(
-        "answers kept {} dropped {} distinct strings {} sigma_rand {:.4}",
-        global.n,
-        dropped,
-        names.len(),
-        sigma_rand
+        "answers kept {} dropped {dropped} distinct strings {}",
+        answers.len(),
+        names.len()
     );
+
+    let centroids = colour_bins(bins);
+    let mut bin_of: HashMap<[u8; 3], u16> = HashMap::new();
+    let mut pairs: Vec<(u32, u16)> = Vec::with_capacity(answers.len());
+    let mut prior = vec![0u64; bins];
+
+    for &(id, rgb) in &answers {
+        let bin = *bin_of
+            .entry(rgb)
+            .or_insert_with(|| nearest(&centroids, rgb_to_oklab(rgb)) as u16);
+
+        prior[bin as usize] += 1;
+        pairs.push((id, bin));
+    }
+
+    pairs.sort_unstable();
+
+    let mut hists: Vec<Histogram> = vec![Vec::new(); names.len()];
+
+    for chunk in pairs.chunk_by(|a, b| a == b) {
+        let (id, bin) = chunk[0];
+        hists[id as usize].push((bin, chunk.len() as u32));
+    }
 
     // A translated string inherits the answers of its English source, on top of any answers
     // the survey already has for it.
@@ -303,14 +205,14 @@ pub fn prepare(raw: &Path, translations: &Path, associations: &Path, derived: &P
         let Some(&src) = ids.get(&en) else {
             continue;
         };
-        let source = aggs[src as usize].clone();
+        let source = hists[src as usize].clone();
         let dst = *ids.entry(fr).or_insert_with_key(|k| {
             names.push(k.clone());
-            aggs.push(Agg::default());
+            hists.push(Vec::new());
             names.len() as u32 - 1
         });
 
-        aggs[dst as usize].merge(&source);
+        hists[dst as usize] = merge(&hists[dst as usize], &source);
         translated += 1;
     }
 
@@ -318,188 +220,158 @@ pub fn prepare(raw: &Path, translations: &Path, associations: &Path, derived: &P
 
     fs::create_dir_all(derived)?;
 
-    let mut assoc_out = BufWriter::new(File::create(derived.join("associations.tsv"))?);
-    let mut assoc_forms: HashSet<String> = HashSet::new();
+    let mut out = BufWriter::new(File::create(derived.join("bins.tsv"))?);
+    let prior_total: u64 = prior.iter().sum();
 
-    for concept in load_concepts(associations)? {
-        let mut sum = [0f64; 3];
-
-        for colour in &concept.colours {
-            let agg = ids
-                .get(colour)
-                .map(|&id| &aggs[id as usize])
-                .filter(|a| a.n >= MIN_COUNT)
-                .with_context(|| format!("association colour {colour:?} is not a survey string"))?;
-            let m = agg.mean();
-
-            for i in 0..3 {
-                sum[i] += m[i] / concept.colours.len() as f64;
-            }
-        }
-
-        for form in &concept.forms {
-            if !assoc_forms.insert(form.clone()) {
-                bail!("association form {form:?} appears twice");
-            }
-
-            writeln!(
-                assoc_out,
-                "{form}\t{:.5}\t{:.5}\t{:.5}\t{}",
-                sum[0], sum[1], sum[2], concept.agreement
-            )?;
-        }
-    }
-
-    println!("association forms: {}", assoc_forms.len());
-
-    let mut rows: Vec<(&String, &Agg)> = names
-        .iter()
-        .zip(&aggs)
-        .filter(|(name, a)| a.n >= MIN_COUNT && !assoc_forms.contains(*name))
-        .collect();
-    rows.sort_by(|a, b| b.1.n.cmp(&a.1.n).then_with(|| a.0.cmp(b.0)));
-
-    let mut out = BufWriter::new(File::create(derived.join("positives.tsv"))?);
-    writeln!(out, "# sigma_rand={sigma_rand}")?;
-
-    for (name, agg) in &rows {
-        let m = agg.mean();
+    for (c, n) in centroids.iter().zip(&prior) {
         writeln!(
             out,
-            "{}\t{}\t{:.5}\t{:.5}\t{:.5}\t{:.5}",
-            name,
-            agg.n,
-            m[0],
-            m[1],
-            m[2],
-            agg.variance().sqrt()
+            "{:.6}\t{:.6}\t{:.6}\t{:.8}",
+            c[0],
+            c[1],
+            c[2],
+            *n as f64 / prior_total as f64
         )?;
     }
 
-    println!("positives (n >= {MIN_COUNT}): {}", rows.len());
+    let mut rows: Vec<(&String, &Histogram, u32)> = names
+        .iter()
+        .zip(&hists)
+        .map(|(name, h)| (name, h, total(h)))
+        .filter(|r| r.2 >= MIN_COUNT)
+        .collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
 
-    // Interleaved by rank so that any prefix of the list is bilingual.
+    let mut out = BufWriter::new(File::create(derived.join("strings.tsv"))?);
+
+    for (name, hist, n) in &rows {
+        let cells: Vec<String> = hist.iter().map(|(b, c)| format!("{b}:{c}")).collect();
+        writeln!(out, "{name}\t{n}\t{}", cells.join(" "))?;
+    }
+
+    println!("strings (n >= {MIN_COUNT}): {}", rows.len());
+
+    // Frequent words the survey has no answers for. Interleaved by rank so that any prefix of
+    // the list is bilingual.
     let english = word_list(&raw.join("google-20k.txt"), WORDS_PER_LANGUAGE)?;
     let french = word_list(&raw.join("french-50k.txt"), WORDS_PER_LANGUAGE)?;
-    let colour_words: HashSet<&str> = names
-        .iter()
-        .zip(&aggs)
-        .filter(|(_, a)| a.n >= COLOUR_WORD_COUNT)
-        .map(|(name, _)| name.as_str())
-        .chain(assoc_forms.iter().map(String::as_str))
-        .collect();
-    let is_colour_inflection = |word: &str| {
-        base_forms(word)
-            .iter()
-            .any(|base| colour_words.contains(base.as_str()))
-    };
-    let mut negatives = BufWriter::new(File::create(derived.join("negatives.txt"))?);
+    let mut vocabulary = BufWriter::new(File::create(derived.join("vocabulary.txt"))?);
     let mut seen = HashSet::new();
 
     for i in 0..english.len().max(french.len()) {
         for word in english.get(i).into_iter().chain(french.get(i)) {
-            let excluded =
-                ids.contains_key(word) || assoc_forms.contains(word) || is_colour_inflection(word);
-
-            if !excluded && seen.insert(word.clone()) {
-                writeln!(negatives, "{word}")?;
+            if !ids.contains_key(word) && seen.insert(word.clone()) {
+                writeln!(vocabulary, "{word}")?;
             }
         }
     }
 
-    println!("negatives: {}", seen.len());
+    println!("vocabulary without answers: {}", seen.len());
 
     Ok(())
 }
 
-/// One aggregated survey string.
+/// A string with the answers observed for it, possibly none.
 #[derive(Debug, Clone)]
-pub struct Positive {
+pub struct Observed {
     pub text: String,
-    pub count: u32,
-    pub oklab: [f32; 3],
-    pub sigma: f32,
+    pub hist: Histogram,
 }
 
-/// One surface form of a curated association.
-#[derive(Debug, Clone)]
-pub struct Association {
-    pub text: String,
-    pub oklab: [f32; 3],
-    pub agreement: f32,
+impl Observed {
+    pub fn count(&self) -> u32 {
+        total(&self.hist)
+    }
 }
 
 pub struct Derived {
-    pub sigma_rand: f32,
-    pub positives: Vec<Positive>,
-    pub associations: Vec<Association>,
-    pub negatives: Vec<String>,
+    pub centroids: Vec<[f32; 3]>,
+    /// Share of all survey answers in each bin.
+    pub prior: Vec<f32>,
+    /// Survey strings with their answers.
+    pub strings: Vec<Observed>,
+    /// Frequent words without answers.
+    pub vocabulary: Vec<String>,
+}
+
+impl Derived {
+    /// Target distribution for `hist`: its answers plus `alpha` pseudo-answers spread like the
+    /// prior, normalised. With no answers it is the prior itself.
+    pub fn target(&self, hist: &Histogram, alpha: f32) -> Vec<f32> {
+        let mut t: Vec<f32> = self.prior.iter().map(|p| alpha * p).collect();
+
+        for &(bin, n) in hist {
+            t[bin as usize] += n as f32;
+        }
+
+        let sum: f32 = t.iter().sum();
+        t.iter_mut().for_each(|v| *v /= sum);
+        t
+    }
+}
+
+fn parse_histogram(field: &str) -> Result<Histogram> {
+    field
+        .split_whitespace()
+        .map(|cell| {
+            let (b, n) = cell.split_once(':').context("bin:count")?;
+
+            Ok((b.parse()?, n.parse()?))
+        })
+        .collect()
 }
 
 pub fn load_derived(derived: &Path) -> Result<Derived> {
-    let text = fs::read_to_string(derived.join("positives.tsv"))
-        .context("read positives.tsv (run prepare)")?;
-    let mut lines = text.lines();
-    let header = lines.next().unwrap_or_default();
+    let mut centroids = Vec::new();
+    let mut prior = Vec::new();
 
-    let Some(sigma_rand) = header
-        .strip_prefix("# sigma_rand=")
-        .and_then(|v| v.parse().ok())
-    else {
-        bail!("positives.tsv is missing the sigma_rand header");
-    };
+    for line in fs::read_to_string(derived.join("bins.tsv"))
+        .context("read bins.tsv (run prepare)")?
+        .lines()
+    {
+        let f: Vec<f32> = line.split('\t').map(str::parse).collect::<Result<_, _>>()?;
 
-    let mut positives = Vec::new();
-
-    for line in lines {
-        let f: Vec<&str> = line.split('\t').collect();
-
-        if f.len() != 6 {
-            bail!("malformed positives row: {line}");
+        if f.len() != 4 {
+            bail!("malformed bins row: {line}");
         }
 
-        positives.push(Positive {
+        centroids.push([f[0], f[1], f[2]]);
+        prior.push(f[3]);
+    }
+
+    let mut strings = Vec::new();
+
+    for line in fs::read_to_string(derived.join("strings.tsv"))
+        .context("read strings.tsv (run prepare)")?
+        .lines()
+    {
+        let f: Vec<&str> = line.split('\t').collect();
+
+        if f.len() != 3 {
+            bail!("malformed strings row: {line}");
+        }
+
+        strings.push(Observed {
             text: f[0].to_string(),
-            count: f[1].parse()?,
-            oklab: [f[2].parse()?, f[3].parse()?, f[4].parse()?],
-            sigma: f[5].parse()?,
+            hist: parse_histogram(f[2])?,
         });
     }
 
-    let mut associations = Vec::new();
-    let assoc_text = fs::read_to_string(derived.join("associations.tsv"))
-        .context("read associations.tsv (run prepare)")?;
-
-    for line in assoc_text.lines() {
-        let f: Vec<&str> = line.split('\t').collect();
-
-        if f.len() != 5 {
-            bail!("malformed associations row: {line}");
-        }
-
-        associations.push(Association {
-            text: f[0].to_string(),
-            oklab: [f[1].parse()?, f[2].parse()?, f[3].parse()?],
-            agreement: f[4].parse()?,
-        });
-    }
-
-    let negatives: Vec<String> = fs::read_to_string(derived.join("negatives.txt"))
-        .context("read negatives.txt")?
+    let vocabulary: Vec<String> = fs::read_to_string(derived.join("vocabulary.txt"))
+        .context("read vocabulary.txt")?
         .lines()
         .map(str::to_string)
         .collect();
 
     Ok(Derived {
-        sigma_rand,
-        positives,
-        associations,
-        negatives,
+        centroids,
+        prior,
+        strings,
+        vocabulary,
     })
 }
 
-/// Deterministic 10 % hold-out split keyed on the text.
-pub fn is_holdout(text: &str) -> bool {
+fn split_hash(text: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
 
     for b in text.bytes() {
@@ -507,41 +379,17 @@ pub fn is_holdout(text: &str) -> bool {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
 
-    h.is_multiple_of(10)
+    h
 }
 
-/// Maps answer spread and count to the confidence target in `0..=1`.
-///
-/// Spread is shrunk toward the random-color spread with `prior` pseudo-answers, then a logistic
-/// centred at ratio `r0` with width `tau` is applied, plus `kappa` per decade of answer count.
-#[derive(Debug, Clone, Copy)]
-pub struct ConfidenceMap {
-    pub prior: f32,
-    pub r0: f32,
-    pub tau: f32,
-    pub kappa: f32,
+/// Deterministic 10 % hold-out split keyed on the text.
+pub fn is_holdout(text: &str) -> bool {
+    split_hash(text).is_multiple_of(10)
 }
 
-impl Default for ConfidenceMap {
-    fn default() -> Self {
-        ConfidenceMap {
-            prior: 2.0,
-            r0: 0.80,
-            tau: 0.04,
-            kappa: 0.3,
-        }
-    }
-}
-
-impl ConfidenceMap {
-    pub fn target(&self, sigma: f32, n: u32, sigma_rand: f32) -> f32 {
-        let var_post = (n as f32 * sigma * sigma + self.prior * sigma_rand * sigma_rand)
-            / (n as f32 + self.prior);
-        let ratio = var_post.sqrt() / sigma_rand;
-        let z = (self.r0 - ratio) / self.tau + self.kappa * (n as f32 / 100.0).log10();
-
-        1.0 / (1.0 + (-z).exp())
-    }
+/// Half of the hold-out set, used to fit the temperature; evaluation uses the other half.
+pub fn is_calibration(text: &str) -> bool {
+    split_hash(text).is_multiple_of(20)
 }
 
 /// The 949 xkcd names with their reference colors, for evaluation.
@@ -601,34 +449,24 @@ mod tests {
     }
 
     #[test]
-    fn dominant_cells_pull_the_mean() {
-        let mut agg = Agg::default();
+    fn histograms_merge_by_bin() {
+        let merged = merge(&vec![(1, 2), (5, 1)], &vec![(5, 3), (7, 1)]);
 
-        agg.push([0.2, 0.0, 0.0], 0.9);
-        agg.push([0.6, 0.0, 0.0], 0.1);
-
-        assert!((agg.mean()[0] - 0.24).abs() < 1e-6);
-        assert!((agg.variance().sqrt() - 0.2).abs() < 1e-6);
+        assert_eq!(merged, vec![(1, 2), (5, 4), (7, 1)]);
+        assert_eq!(total(&merged), 7);
+        assert_eq!(parse_histogram("1:2 5:4 7:1").unwrap(), merged);
     }
 
     #[test]
-    fn cell_index_covers_the_cube() {
-        assert_eq!(cell([0, 0, 0]), 0);
-        assert_eq!(cell([255, 255, 255]), (1 << (3 * CELL_BITS)) - 1);
-        assert_eq!(cell([16, 0, 0]), 1 << (2 * CELL_BITS));
-    }
+    fn target_shrinks_toward_the_prior() {
+        let d = Derived {
+            centroids: vec![[0.0; 3]; 2],
+            prior: vec![0.5, 0.5],
+            strings: Vec::new(),
+            vocabulary: Vec::new(),
+        };
 
-    #[test]
-    fn confidence_target_shape() {
-        let map = ConfidenceMap::default();
-        let basic = map.target(0.168, 270_000, 0.234);
-        let tight = map.target(0.09, 6000, 0.234);
-        let junk = map.target(0.20, 150, 0.234);
-        let rare = map.target(0.0, 2, 0.234);
-
-        assert!(basic > 0.9, "{basic}");
-        assert!(tight > 0.99, "{tight}");
-        assert!(junk < 0.3, "{junk}");
-        assert!(rare > 0.5 && rare < 0.95, "{rare}");
+        assert_eq!(d.target(&vec![], 2.0), vec![0.5, 0.5]);
+        assert_eq!(d.target(&vec![(0, 8)], 2.0), vec![0.9, 0.1]);
     }
 }

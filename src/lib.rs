@@ -5,20 +5,23 @@
 //! println!("{} rgb={:?} confidence={:.2}", p.hex(), p.rgb, p.confidence);
 //! ```
 //!
-//! The model is a small hashed character-n-gram network trained on the xkcd color survey,
-//! so it tolerates typos ("bleu"), understands modifiers ("pale", "neon") and common
-//! associations ("grass", "blood"). `confidence` is how predictable the color is from the text:
-//! near 1 for unambiguous color names, near 0 for text that does not describe a color.
+//! The model is a small hashed character-n-gram network that predicts, for any text, the
+//! distribution of colours people would pick for it. It tolerates typos ("bleu"), understands
+//! modifiers ("pale", "neon") and associations ("grass", "blood"). The colour is the densest part
+//! of that distribution and `confidence` is the share of people who would pick a colour close to
+//! it: near 1 for unambiguous colour names, low for text without a consistent colour.
 
 pub mod color;
 pub mod net;
+pub mod readout;
 #[doc(hidden)]
 pub mod text;
 
 use burn::prelude::*;
 use burn::store::{BurnpackStore, HalfPrecisionAdapter, ModuleSnapshot};
-use color::{AB_SCALE, oklab_to_rgb};
-use net::{Net, NetConfig, OUTPUTS};
+use color::oklab_to_rgb;
+use net::{Net, NetConfig};
+use readout::Readout;
 use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -38,8 +41,8 @@ pub struct Prediction {
     pub rgb: [u8; 3],
     /// The same color in Oklab `[L, a, b]`, before gamut clamping.
     pub oklab: [f32; 3],
-    /// How predictable the color is from the text, in `0..=1`.
-    /// 1 means people agree on the color this text names; 0 means it is not a color description.
+    /// Share of people who would pick a color close to this one for the text, in `0..=1`.
+    /// Above 0.5, most people agree on the color; text without a consistent color scores low.
     pub confidence: f32,
 }
 
@@ -65,6 +68,8 @@ impl std::error::Error for LoadError {}
 /// A loaded network ready for inference on the CPU.
 pub struct Model {
     net: Net,
+    readout: Readout,
+    config: NetConfig,
     device: Device,
 }
 
@@ -78,9 +83,25 @@ impl Model {
         })
     }
 
-    /// Wraps an already initialised network living on `device`.
-    pub fn new(net: Net, device: Device) -> Model {
-        Model { net, device }
+    /// Wraps an already initialised network living on `device`, read out as `config` says.
+    pub fn new(net: Net, config: NetConfig, device: Device) -> Model {
+        let readout = Readout::new(net.centroids(), config.radius, config.colour_radius);
+
+        Model {
+            net,
+            readout,
+            config,
+            device,
+        }
+    }
+
+    pub fn config(&self) -> NetConfig {
+        self.config
+    }
+
+    /// Sets the temperature applied to the logits, as fitted after training.
+    pub fn set_temperature(&mut self, temperature: f32) {
+        self.config.temperature = temperature;
     }
 
     /// Loads burnpack weights embedded in the binary.
@@ -105,11 +126,11 @@ impl Model {
         net.load_from(&mut store)
             .map_err(|e| LoadError(e.to_string()))?;
 
-        Ok(Model { net, device })
+        Ok(Model::new(net, config, device))
     }
 
-    /// Saves the weights as f16 burnpack plus a `.cfg` sidecar describing the shape.
-    pub fn save(&self, path: impl AsRef<Path>, config: NetConfig) -> Result<(), LoadError> {
+    /// Saves the weights as f16 burnpack plus a `.cfg` sidecar with the shape and readout.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), LoadError> {
         let path = path.as_ref();
         let mut store = BurnpackStore::from_file(path)
             .with_to_adapter(HalfPrecisionAdapter::new())
@@ -118,15 +139,26 @@ impl Model {
         self.net
             .save_into(&mut store)
             .map_err(|e| LoadError(e.to_string()))?;
-        std::fs::write(path.with_extension("cfg"), config.to_text())
+        std::fs::write(path.with_extension("cfg"), self.config.to_text())
             .map_err(|e| LoadError(e.to_string()))?;
 
         Ok(())
     }
 
-    /// Raw network outputs `[L, a * AB_SCALE, b * AB_SCALE, confidence logit]` for each text.
-    /// Texts without any feature yield `None`.
-    pub fn raw_outputs(&self, texts: &[&str]) -> Vec<Option<[f32; OUTPUTS]>> {
+    pub fn readout(&self) -> &Readout {
+        &self.readout
+    }
+
+    /// Probability of each colour bin for each text. Texts without any feature yield `None`.
+    pub fn distributions(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
+        self.logits(texts)
+            .into_iter()
+            .map(|z| z.map(|z| softmax(&z, self.config.temperature)))
+            .collect()
+    }
+
+    /// Bin logits for each text, before the temperature. Texts without any feature yield `None`.
+    pub fn logits(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
         if texts.is_empty() {
             return Vec::new();
         }
@@ -135,13 +167,12 @@ impl Model {
         let non_empty = batch.non_empty.clone();
         let out = self.net.forward(batch).into_data();
         let values = out.as_slice::<f32>().expect("f32 outputs");
+        let bins = values.len() / texts.len();
 
         values
-            .as_chunks::<OUTPUTS>()
-            .0
-            .iter()
+            .chunks(bins)
             .zip(non_empty)
-            .map(|(row, ok)| ok.then_some(*row))
+            .map(|(row, ok)| ok.then(|| row.to_vec()))
             .collect()
     }
 
@@ -152,12 +183,11 @@ impl Model {
 
     /// Predicts several texts in one pass, cheaper than calling [`Model::predict`] in a loop.
     pub fn predict_many(&self, texts: &[&str]) -> Vec<Prediction> {
-        self.raw_outputs(texts)
+        self.distributions(texts)
             .into_iter()
-            .map(|out| match out {
-                Some(out) => {
-                    let oklab = [out[0], out[1] / AB_SCALE, out[2] / AB_SCALE];
-                    let confidence = 1.0 / (1.0 + (-out[3]).exp());
+            .map(|p| match p {
+                Some(p) => {
+                    let (oklab, confidence) = self.readout.read(&p);
 
                     Prediction {
                         rgb: oklab_to_rgb(oklab),
@@ -175,6 +205,18 @@ impl Model {
     }
 }
 
+/// Softmax of `logits / temperature`.
+pub fn softmax(logits: &[f32], temperature: f32) -> Vec<f32> {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exp: Vec<f32> = logits
+        .iter()
+        .map(|z| ((z - max) / temperature).exp())
+        .collect();
+    let sum: f32 = exp.iter().sum();
+
+    exp.into_iter().map(|e| e / sum).collect()
+}
+
 /// Predicts a color with the model embedded in the library.
 pub fn predict(text: &str) -> Prediction {
     Model::embedded().predict(text)
@@ -184,20 +226,32 @@ pub fn predict(text: &str) -> Prediction {
 mod tests {
     use super::*;
 
+    const TINY: NetConfig = NetConfig {
+        log2_buckets: 10,
+        dim: 8,
+        hidden: 6,
+        bins: 3,
+        radius: 0.1,
+        colour_radius: 0.05,
+        temperature: 1.0,
+    };
+
+    fn tiny_model() -> Model {
+        let device = Device::flex();
+        let centroids = [[0.2, 0.0, 0.0], [0.6, 0.1, 0.0], [0.9, 0.0, -0.1]];
+        let net = TINY.init(&device).with_centroids(&centroids, &device);
+
+        Model::new(net, TINY, device)
+    }
+
     #[test]
     fn save_and_reload_gives_identical_outputs() {
-        let config = NetConfig {
-            log2_buckets: 10,
-            dim: 8,
-            hidden: 6,
-        };
-        let device = Device::flex();
-        let model = Model::new(config.init(&device), device);
+        let model = tiny_model();
         let dir = std::env::temp_dir().join(format!("text2color-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("net.bpk");
 
-        model.save(&path, config).unwrap();
+        model.save(&path).unwrap();
 
         let reloaded = Model::from_file(
             &path,
@@ -208,30 +262,41 @@ mod tests {
         let probes = ["blue", "dark teal", "x y z"];
 
         for (a, b) in model
-            .raw_outputs(&probes)
+            .distributions(&probes)
             .into_iter()
-            .zip(reloaded.raw_outputs(&probes))
+            .zip(reloaded.distributions(&probes))
         {
             let (a, b) = (a.unwrap(), b.unwrap());
 
-            for k in 0..OUTPUTS {
+            for k in 0..TINY.bins {
                 assert!((a[k] - b[k]).abs() < 1e-2, "{a:?} vs {b:?}");
             }
+        }
+
+        for (a, b) in model
+            .readout()
+            .centroids()
+            .iter()
+            .zip(reloaded.readout().centroids())
+        {
+            assert!(color::delta_e(*a, *b) < 1e-3, "{a:?} vs {b:?}");
         }
 
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
+    fn temperature_sharpens_or_flattens() {
+        let sharp = softmax(&[1.0, 0.0], 0.5);
+        let flat = softmax(&[1.0, 0.0], 2.0);
+
+        assert!(sharp[0] > flat[0] && flat[0] > 0.5);
+        assert!((sharp.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn empty_text_is_gray_with_zero_confidence() {
-        let config = NetConfig {
-            log2_buckets: 10,
-            dim: 8,
-            hidden: 6,
-        };
-        let device = Device::flex();
-        let model = Model::new(config.init(&device), device);
-        let p = model.predict("!!!");
+        let p = tiny_model().predict("!!!");
 
         assert_eq!(p.confidence, 0.0);
         assert_eq!(p.rgb, [128, 128, 128]);

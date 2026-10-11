@@ -1,9 +1,11 @@
 //! Evaluation of an exported model through the library's inference path.
 
 use crate::augment::{strip_accents, typo};
-use crate::data::{ConfidenceMap, Derived, is_holdout, load_translations, load_xkcd};
+use crate::data::{
+    Derived, RELIABLE_COUNT, is_calibration, is_holdout, load_translations, load_xkcd,
+};
 use crate::train::auc;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::collections::HashMap;
@@ -11,76 +13,120 @@ use std::path::Path;
 use std::time::Instant;
 use text2color::Model;
 use text2color::color::{delta_e, rgb_to_oklab};
+use text2color::readout::Readout;
 
-pub const PROBES: &[&str] = &[
-    "red",
-    "green",
-    "blue",
-    "yellow",
-    "orange",
-    "purple",
-    "pink",
-    "brown",
-    "black",
-    "white",
-    "grey",
-    "bleu",
-    "gren",
-    "purpel",
-    "yelow",
-    "ornage",
-    "dark blue",
-    "light blue",
-    "pale pink",
-    "hot pink",
-    "neon green",
-    "sky",
-    "grass",
-    "blood",
-    "lemon",
-    "chocolate",
-    "ocean",
-    "sunset",
-    "table",
-    "monday",
-    "running",
-    "asdfgh",
-    "a dark blue",
-    "blue car",
-    "the color red",
-    "blue green",
-    "teal",
-    "rouge",
-    "vert",
-    "jaune",
-    "violet",
-    "marron",
-    "gris",
-    "bleu clair",
-    "vert foncé",
-    "vert fonce",
-    "rose pâle",
-    "bleu marine",
-    "ciel",
-    "herbe",
-    "sang",
-    "citron",
-    "chocolat",
-    "lundi",
-    "voiture bleue",
-    "",
+/// Radii compared in the agreement-radius sweep.
+const RADII: [f32; 6] = [0.05, 0.075, 0.1, 0.125, 0.15, 0.2];
+const BASIC_TERMS: &[&str] = &[
+    "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "white",
+    "grey", "rouge", "jaune", "vert", "bleu", "violet", "rose", "marron", "noir", "blanc", "gris",
 ];
 
-pub fn probes(model: &Model) {
-    for (p, r) in PROBES.iter().zip(model.predict_many(PROBES)) {
+fn load_probes(path: &Path) -> Result<Vec<String>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+pub fn probes(model: &Model, path: &Path) -> Result<()> {
+    let texts = load_probes(path)?;
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+
+    for (p, r) in refs.iter().zip(model.predict_many(&refs)) {
         println!(
-            "  {:<16} {}  rgb({:>3},{:>3},{:>3})  conf {:.2}",
+            "  {:<20} {}  rgb({:>3},{:>3},{:>3})  conf {:.2}",
             p,
             r.hex(),
             r.rgb[0],
             r.rgb[1],
             r.rgb[2],
             r.confidence
+        );
+    }
+
+    Ok(())
+}
+
+fn distributions(model: &Model, texts: &[&str]) -> Vec<Vec<f32>> {
+    texts
+        .chunks(512)
+        .flat_map(|chunk| model.distributions(chunk))
+        .map(|p| p.unwrap_or_default())
+        .collect()
+}
+
+fn normalised(d: &Derived, hist: &crate::data::Histogram) -> Vec<f32> {
+    d.target(hist, 0.0)
+}
+
+/// Predicted confidence against the agreement measured from the answers themselves, on
+/// hold-out strings outside the calibration fold with enough answers, in deciles of predicted
+/// confidence.
+fn reliability_report(model: &Model, d: &Derived) {
+    let rows: Vec<_> = d
+        .strings
+        .iter()
+        .filter(|s| is_holdout(&s.text) && !is_calibration(&s.text) && s.count() >= RELIABLE_COUNT)
+        .collect();
+    let texts: Vec<&str> = rows.iter().map(|s| s.text.as_str()).collect();
+    let mut pairs: Vec<(f32, f32)> = rows
+        .iter()
+        .zip(model.predict_many(&texts))
+        .map(|(s, p)| {
+            (
+                p.confidence,
+                model.readout().read(&normalised(d, &s.hist)).1,
+            )
+        })
+        .collect();
+
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    println!(
+        "reliability on {} hold-out strings with >= {RELIABLE_COUNT} answers (predicted vs measured agreement):",
+        pairs.len()
+    );
+
+    for decile in pairs.chunks(pairs.len().div_ceil(10).max(1)) {
+        let n = decile.len() as f32;
+        let predicted: f32 = decile.iter().map(|p| p.0).sum::<f32>() / n;
+        let measured: f32 = decile.iter().map(|p| p.1).sum::<f32>() / n;
+
+        println!(
+            "  predicted {predicted:.2}  measured {measured:.2}  ({} strings)",
+            decile.len()
+        );
+    }
+}
+
+/// Confidence of basic colour terms, xkcd names and unanswered words for several radii.
+fn radius_sweep(model: &Model, d: &Derived, xkcd: &[(String, [u8; 3])]) {
+    let vocab: Vec<&str> = d
+        .vocabulary
+        .iter()
+        .filter(|w| is_holdout(w))
+        .map(String::as_str)
+        .collect();
+    let names: Vec<&str> = xkcd.iter().map(|(n, _)| n.as_str()).collect();
+    let (basic, names, vocab) = (
+        distributions(model, BASIC_TERMS),
+        distributions(model, &names),
+        distributions(model, &vocab),
+    );
+    let centroids = model.readout().centroids().to_vec();
+    let share = |r: &Readout, ps: &[Vec<f32>]| {
+        ps.iter().filter(|p| r.read(p).1 >= 0.5).count() as f32 / ps.len() as f32
+    };
+
+    println!("radius sweep (model trained at its own radius; confidence re-read at each radius):");
+
+    for radius in RADII {
+        let r = Readout::new(centroids.clone(), radius, model.config().colour_radius);
+        let mean_basic: f32 = basic.iter().map(|p| r.read(p).1).sum::<f32>() / basic.len() as f32;
+
+        println!(
+            "  r {radius:.3}: basic terms mean {mean_basic:.2}, xkcd names >= 0.5: {:.0}%, unanswered words >= 0.5: {:.1}%",
+            100.0 * share(&r, &names),
+            100.0 * share(&r, &vocab)
         );
     }
 }
@@ -127,9 +173,9 @@ fn segment(name: &str, words: &HashMap<&str, f64>) -> String {
 fn css_report(model: &Model, d: &Derived) {
     let mut counts: HashMap<&str, f64> = HashMap::new();
 
-    for p in &d.positives {
-        for token in p.text.split(' ').filter(|t| t.len() >= 3) {
-            *counts.entry(token).or_default() += p.count as f64;
+    for s in &d.strings {
+        for token in s.text.split(' ').filter(|t| t.len() >= 3) {
+            *counts.entry(token).or_default() += s.count() as f64;
         }
     }
 
@@ -205,80 +251,85 @@ fn french_report(model: &Model, xkcd: &[(String, [u8; 3])], translations: &Path)
     Ok(())
 }
 
-/// Fit to the curated associations: color error and confidence error against the agreement.
-fn association_report(model: &Model, d: &Derived) {
-    let texts: Vec<&str> = d.associations.iter().map(|a| a.text.as_str()).collect();
-    let preds = model.predict_many(&texts);
-    let mut errs: Vec<f32> = Vec::new();
-    let mut conf_err = 0f32;
-    let mut gated = 0;
-
-    for (a, p) in d.associations.iter().zip(&preds) {
-        errs.push(delta_e(p.oklab, a.oklab));
-        conf_err += (p.confidence - a.agreement).abs();
-
-        if (p.confidence >= 0.5) == (a.agreement >= 0.5) {
-            gated += 1;
-        }
-    }
-
-    errs.sort_by(f32::total_cmp);
-
-    let n = errs.len();
-
-    println!(
-        "associations ({n} forms): median dE {:.4}, p90 {:.4}; mean |confidence - agreement| {:.3}; same side of 0.5: {gated}/{n}",
-        errs[n / 2],
-        errs[n * 9 / 10],
-        conf_err / n as f32
-    );
-}
-
 pub fn report(
     model: &Model,
     d: &Derived,
     raw: &Path,
     translations: &Path,
-    map: ConfidenceMap,
+    probe_path: &Path,
+    alpha: f32,
 ) -> Result<()> {
     let mut err_sum = 0f32;
     let mut err_n = 0;
     let mut scored = Vec::new();
 
-    for p in d.positives.iter().filter(|p| is_holdout(&p.text)) {
-        let c = map.target(p.sigma, p.count, d.sigma_rand);
-        let r = model.predict(&p.text);
+    for s in d.strings.iter().filter(|s| is_holdout(&s.text)) {
+        let (colour, confidence) = model.readout().read(&d.target(&s.hist, alpha));
 
-        if c > 0.5 {
-            err_sum += delta_e(r.oklab, p.oklab);
+        if confidence > 0.5 {
+            let p = model.predict(&s.text);
+
+            err_sum += delta_e(p.oklab, colour);
             err_n += 1;
-            scored.push((r.confidence, true));
+            scored.push((p.confidence, true));
         }
     }
 
-    for w in d.negatives.iter().filter(|w| is_holdout(w)) {
-        scored.push((model.predict(w).confidence, false));
-    }
+    let unanswered: Vec<&str> = d
+        .vocabulary
+        .iter()
+        .filter(|w| is_holdout(w))
+        .map(String::as_str)
+        .collect();
+    let unanswered = model.predict_many(&unanswered);
+    let passing = unanswered.iter().filter(|p| p.confidence >= 0.5).count();
+
+    scored.extend(unanswered.iter().map(|p| (p.confidence, false)));
 
     println!(
-        "holdout confident positives: {err_n}, mean dE {:.4}",
+        "holdout confident strings: {err_n}, mean dE {:.4}",
         err_sum / err_n.max(1) as f32
     );
     println!(
-        "confidence AUC (holdout positives c>0.5 vs negatives): {:.4}",
+        "confidence AUC (holdout confident strings vs unanswered words): {:.4}",
         auc(&mut scored)
     );
-
-    let negatives: Vec<f32> = scored.iter().filter(|s| !s.1).map(|s| s.0).collect();
-    let passing = negatives.iter().filter(|&&c| c >= 0.5).count();
-
     println!(
-        "holdout negatives at confidence >= 0.5: {passing}/{} ({:.2}%)",
-        negatives.len(),
-        100.0 * passing as f32 / negatives.len().max(1) as f32
+        "holdout unanswered words at confidence >= 0.5: {passing}/{} ({:.2}%)",
+        unanswered.len(),
+        100.0 * passing as f32 / unanswered.len().max(1) as f32
     );
 
+    reliability_report(model, d);
+
     let xkcd = load_xkcd(raw)?;
+
+    radius_sweep(model, d, &xkcd);
+
+    // The same readout on the human answers themselves: the floor for the model's xkcd error.
+    let answers: HashMap<&str, &crate::data::Histogram> = d
+        .strings
+        .iter()
+        .map(|s| (s.text.as_str(), &s.hist))
+        .collect();
+    let mut floor: Vec<f32> = xkcd
+        .iter()
+        .filter_map(|(name, rgb)| {
+            let hist = answers.get(name.as_str())?;
+            let (colour, _) = model.readout().read(&normalised(d, hist));
+
+            Some(delta_e(colour, rgb_to_oklab(*rgb)))
+        })
+        .collect();
+    floor.sort_by(f32::total_cmp);
+
+    println!(
+        "xkcd names, readout of the human answers ({}): median dE {:.4}, p90 {:.4}",
+        floor.len(),
+        floor[floor.len() / 2],
+        floor[floor.len() * 9 / 10]
+    );
+
     let mut errs: Vec<f32> = xkcd
         .iter()
         .map(|(name, rgb)| delta_e(model.predict(name).oklab, rgb_to_oklab(*rgb)))
@@ -292,7 +343,6 @@ pub fn report(
     );
 
     french_report(model, &xkcd, translations)?;
-    association_report(model, d);
     css_report(model, d);
 
     let mut rng = StdRng::seed_from_u64(7);
@@ -320,20 +370,20 @@ pub fn report(
         100.0 * robust as f32 / tried.max(1) as f32
     );
 
+    let texts = load_probes(probe_path)?;
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let started = Instant::now();
-    let rounds = 2000;
+    let rounds = 200;
 
     for _ in 0..rounds {
-        for p in PROBES {
+        for p in &refs {
             std::hint::black_box(model.predict(p));
         }
     }
 
-    let per_query = started.elapsed().as_secs_f64() / (rounds * PROBES.len()) as f64;
+    let per_query = started.elapsed().as_secs_f64() / (rounds * refs.len()) as f64;
     println!("latency: {:.1} us/query", per_query * 1e6);
 
     println!("probes:");
-    probes(model);
-
-    Ok(())
+    probes(model, probe_path)
 }

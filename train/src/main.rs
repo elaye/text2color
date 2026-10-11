@@ -1,4 +1,5 @@
 mod augment;
+mod bins;
 mod data;
 mod eval;
 mod train;
@@ -20,25 +21,30 @@ struct Cli {
     /// `english<TAB>french` pairs applied to the survey strings
     #[arg(long, default_value = "train/translations/en-fr.tsv")]
     translations: PathBuf,
-    /// Curated word-colour associations with agreement scores
-    #[arg(long, default_value = "train/associations.tsv")]
-    associations: PathBuf,
+    /// Texts printed with their predictions after training and evaluation, one per line
+    #[arg(long, default_value = "train/probes.txt")]
+    probes: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Parse the raw survey dump into data/derived
-    Prepare,
+    /// Parse the raw survey dump into colour-bin histograms in data/derived
+    Prepare {
+        /// Number of colour bins
+        #[arg(long, default_value_t = 1024)]
+        bins: usize,
+    },
     /// Train and export a model
     Train(TrainArgs),
     /// Evaluate an exported model through the library
     Eval {
         #[arg(long, default_value = "model/text2color.bpk")]
         model: PathBuf,
-        #[command(flatten)]
-        confidence: ConfidenceArgs,
+        /// Pseudo-answers spread like the prior, as in training
+        #[arg(long, default_value_t = 2.0)]
+        alpha: f32,
     },
 }
 
@@ -50,8 +56,14 @@ struct TrainArgs {
     log2_buckets: u32,
     #[arg(long, default_value_t = 32)]
     dim: usize,
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 256)]
     hidden: usize,
+    /// Oklab distance within which two colours count as the same answer
+    #[arg(long, default_value_t = 0.125)]
+    radius: f32,
+    /// Neighbourhood of the peak averaged into the returned colour
+    #[arg(long, default_value_t = 0.05)]
+    colour_radius: f32,
     #[arg(long, default_value_t = 20)]
     epochs: usize,
     #[arg(long, default_value_t = 128)]
@@ -60,24 +72,14 @@ struct TrainArgs {
     lr: f64,
     #[arg(long, default_value_t = 0.01)]
     weight_decay: f32,
-    #[command(flatten)]
-    confidence: ConfidenceArgs,
-    #[arg(long, default_value_t = 3.0)]
-    neg_weight: f32,
-    /// Random negative word pairs, as a fraction of the negative word count
+    /// Pseudo-answers spread like the prior, added to every string's answers
+    #[arg(long, default_value_t = 2.0)]
+    alpha: f32,
+    /// Random word pairs without answers, as a fraction of the vocabulary
     #[arg(long, default_value_t = 0.5)]
     pair_fraction: f32,
-    /// Loss weight of a curated association example
-    #[arg(long, default_value_t = 4.0)]
-    assoc_weight: f32,
-    /// Copies of each curated association per epoch
-    #[arg(long, default_value_t = 6)]
-    assoc_repeat: usize,
     #[arg(long, default_value_t = 0.3)]
     typo_p: f64,
-    /// Probability of inflecting a word (French gender and number, English -er/-y)
-    #[arg(long, default_value_t = 0.15)]
-    inflect_p: f64,
     #[arg(long, default_value_t = 0.15)]
     noise_p: f64,
     /// Probability of dropping accents from a training example
@@ -108,7 +110,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Prepare => data::prepare(&cli.raw, &cli.translations, &cli.associations, &cli.derived),
+        Cmd::Prepare { bins } => data::prepare(&cli.raw, &cli.translations, bins, &cli.derived),
         Cmd::Train(a) => {
             let d = data::load_derived(&cli.derived)?;
             let cfg = train::Config {
@@ -116,29 +118,33 @@ fn main() -> Result<()> {
                     log2_buckets: a.log2_buckets,
                     dim: a.dim,
                     hidden: a.hidden,
+                    bins: d.centroids.len(),
+                    radius: a.radius,
+                    colour_radius: a.colour_radius,
+                    temperature: 1.0,
                 },
                 epochs: a.epochs,
                 batch: a.batch,
                 lr: a.lr,
                 weight_decay: a.weight_decay,
-                confidence: a.confidence.map(),
-                neg_weight: a.neg_weight,
+                alpha: a.alpha,
                 pair_fraction: a.pair_fraction,
-                assoc_weight: a.assoc_weight,
-                assoc_repeat: a.assoc_repeat,
                 typo_p: a.typo_p,
-                inflect_p: a.inflect_p,
                 noise_p: a.noise_p,
                 accent_p: a.accent_p,
                 seed: a.seed,
             };
             let dev = device(a.cuda)?;
-            let (model, holdout) = train::train(&d, &cfg, &dev)?;
-            let (err, auc) = train::evaluate(&model, &holdout);
+            let (mut model, holdout) = train::train(&d, &cfg, &dev)?;
+            let temperature = train::fit_temperature(&model, &d);
 
-            println!("final: holdout dE {err:.4}  auc {auc:.4}");
+            model.set_temperature(temperature);
+
+            let (err, auc) = train::evaluate(&model, &d, &holdout, cfg.alpha);
+
+            println!("final: temperature {temperature:.2}  holdout dE {err:.4}  auc {auc:.4}");
             model
-                .save(&a.out, cfg.net)
+                .save(&a.out)
                 .with_context(|| format!("write {}", a.out.display()))?;
             println!(
                 "wrote {} ({} bytes, f16)",
@@ -147,42 +153,13 @@ fn main() -> Result<()> {
             );
 
             let reloaded = load_model(&a.out)?;
-            eval::probes(&reloaded);
-
-            Ok(())
+            eval::probes(&reloaded, &cli.probes)
         }
-        Cmd::Eval { model, confidence } => {
+        Cmd::Eval { model, alpha } => {
             let m = load_model(&model)?;
             let d = data::load_derived(&cli.derived)?;
 
-            eval::report(&m, &d, &cli.raw, &cli.translations, confidence.map())
-        }
-    }
-}
-
-#[derive(clap::Args)]
-struct ConfidenceArgs {
-    /// Pseudo-answers pulling rare strings toward the random-color spread
-    #[arg(long, default_value_t = 2.0)]
-    prior: f32,
-    /// Spread ratio at which the confidence target is 0.5
-    #[arg(long, default_value_t = 0.80)]
-    r0: f32,
-    /// Width of the logistic on the spread ratio
-    #[arg(long, default_value_t = 0.04)]
-    tau: f32,
-    /// Added to the logit per decade of answer count above 100
-    #[arg(long, default_value_t = 0.3)]
-    kappa: f32,
-}
-
-impl ConfidenceArgs {
-    fn map(&self) -> data::ConfidenceMap {
-        data::ConfidenceMap {
-            prior: self.prior,
-            r0: self.r0,
-            tau: self.tau,
-            kappa: self.kappa,
+            eval::report(&m, &d, &cli.raw, &cli.translations, &cli.probes, alpha)
         }
     }
 }
