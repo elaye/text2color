@@ -595,21 +595,31 @@ pub struct Labels {
 }
 
 impl Labels {
-    /// Loads merged labels and fits their calibration on the survey strings with enough answers
-    /// that were also labelled.
+    /// Loads merged label files, pooling the samples each gives a word, and fits their
+    /// calibration on the survey strings with enough answers that were also labelled.
     pub fn load(
-        path: &Path,
+        paths: &[PathBuf],
         palette: &Palette,
         strings: &[Observed],
         prior: &[f32],
     ) -> Result<Labels> {
         let enc = Encoder::new(strings, prior, palette)?;
-        let words = load_labels(path, palette)?;
-        let index: HashMap<String, usize> = words
-            .iter()
-            .enumerate()
-            .map(|(i, (w, _))| (w.clone(), i))
-            .collect();
+        let mut words: Vec<(String, Vec<Label>)> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+
+        for path in paths {
+            for (word, samples) in load_labels(path, palette)? {
+                match index.get(&word) {
+                    Some(&i) => words[i].1.extend(samples),
+                    None => {
+                        index.insert(word.clone(), words.len());
+                        words.push((word, samples));
+                    }
+                }
+            }
+        }
+
+        let samples: usize = words.iter().map(|(_, s)| s.len()).sum();
         let pairs: Vec<(Vec<f32>, Vec<f32>)> = strings
             .iter()
             .filter(|s| s.count() >= RELIABLE_COUNT)
@@ -634,9 +644,8 @@ impl Labels {
         let (mix, power) = fit_calibration(&enc, &pairs);
 
         println!(
-            "labels: {} words from {}, calibration on {} survey strings: mix {mix:.2}, power {power:.1}",
+            "labels: {} words, {samples} samples, calibration on {} survey strings: mix {mix:.2}, power {power:.1}",
             words.len(),
-            path.display(),
             pairs.len()
         );
 

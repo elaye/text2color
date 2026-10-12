@@ -64,15 +64,17 @@ Every training string has a target distribution built the same way:
   merged with any answers it already had (the survey contains some French, "bleu" and "rouge"
   among them).
 - **Color labels for everyday words**: the 50 000 most frequent words of English and of French
-  (82 886 after merging) were labelled once, offline, by Claude Sonnet subagents in Claude Code,
+  (82 886 after merging) were labelled offline by Claude Sonnet subagents in Claude Code,
   following `train/labels/prompt.md`. For each word the label gives the share of people who
   would picture each of about 180 survey color names (`train/labels/palette.txt`), and the
   share who would picture no particular color. Sensory associations count (temperature,
   weather, light); symbolic ones do not ("love" is not red). A palette name stands for all the
   answers the survey collected for it, and the "no color" share for all answers pooled. The
-  labels are calibrated against the survey on the 693 labelled words with at least 30 survey
-  answers. The merged labels are committed in `train/labels/full-sonnet.tsv`; a pilot comparing
-  Haiku and Sonnet labels against the survey is in `train/labels/pilot-*.tsv`.
+  12 742 words given any color were labelled twice more and the three samples averaged, so one
+  noisy answer does not decide a word near the gate. Labels are calibrated against the survey
+  on the 693 labelled words with at least 30 survey answers. The merged labels are committed in
+  `train/labels/full-sonnet.tsv` and `extra-sonnet.tsv`; a pilot comparing Haiku and Sonnet
+  labels against the survey is in `train/labels/pilot-*.tsv`.
 - **Weighting**: each string weighs the square root of its total answers and pseudo-answers, so
   a bare "blue" with 270 k answers outweighs the many phrases sharing its n-grams.
 - **Augmentation**: accents dropped on half the accented examples, random typos and noise

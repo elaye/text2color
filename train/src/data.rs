@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use text2color::color::rgb_to_oklab;
 use text2color::text::normalize;
 
@@ -327,7 +327,7 @@ fn parse_histogram(field: &str) -> Result<Histogram> {
 
 /// Loads the prepared survey data and, if `labels` is given, the colour labels of words, whose
 /// calibration is fitted on the survey strings they share.
-pub fn load_derived(derived: &Path, labels: Option<(&Path, &Palette)>) -> Result<Derived> {
+pub fn load_derived(derived: &Path, labels: Option<(&[PathBuf], &Palette)>) -> Result<Derived> {
     let mut centroids = Vec::new();
     let mut prior = Vec::new();
 
@@ -364,7 +364,7 @@ pub fn load_derived(derived: &Path, labels: Option<(&Path, &Palette)>) -> Result
     }
 
     let labels = labels
-        .map(|(path, palette)| Labels::load(path, palette, &strings, &prior))
+        .map(|(paths, palette)| Labels::load(paths, palette, &strings, &prior))
         .transpose()?;
     let answered: HashSet<&str> = strings.iter().map(|s| s.text.as_str()).collect();
     let vocabulary = labels.as_ref().map_or_else(Vec::new, |l| {

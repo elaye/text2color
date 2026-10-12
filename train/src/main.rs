@@ -31,9 +31,14 @@ struct Cli {
     /// Texts printed with their predictions after training and evaluation, one per line
     #[arg(long, default_value = "train/probes.txt")]
     probes: PathBuf,
-    /// Merged colour labels of words, used in training targets
-    #[arg(long, default_value = "train/labels/full-sonnet.tsv")]
-    labels: PathBuf,
+    /// Merged colour labels of words, used in training targets; samples of the same word in
+    /// several files are pooled
+    #[arg(
+        long,
+        num_args = 1..,
+        default_values = ["train/labels/full-sonnet.tsv", "train/labels/extra-sonnet.tsv"]
+    )]
+    labels: Vec<PathBuf>,
     /// Colour names a label may use
     #[arg(long, default_value = "train/labels/palette.txt")]
     palette: PathBuf,
