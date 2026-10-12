@@ -10,6 +10,7 @@ use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::{IndexedRandom, SliceRandom};
+use std::collections::HashSet;
 use std::time::Instant;
 use text2color::Model;
 use text2color::color::delta_e;
@@ -79,7 +80,13 @@ pub fn build_examples(d: &Derived, cfg: &Config, rng: &mut StdRng) -> Split {
 
 /// Augmented text and the share of the target kept; the rest moves to the prior, since a typo
 /// or an extra word makes the intended colour less certain.
-fn augment(e: &Example, noise_words: &[String], cfg: &Config, rng: &mut StdRng) -> (String, f32) {
+fn augment(
+    e: &Example,
+    noise_words: &[String],
+    known: &HashSet<&str>,
+    cfg: &Config,
+    rng: &mut StdRng,
+) -> (String, f32) {
     let mut text = e.text.clone();
     let mut keep = 1.0;
 
@@ -90,7 +97,8 @@ fn augment(e: &Example, noise_words: &[String], cfg: &Config, rng: &mut StdRng) 
     if rng.random_bool(cfg.typo_p) {
         let typed = typo(&text, rng);
 
-        if typed != text {
+        // A typo that spells another known word ("fraise" -> "frais") would teach it the wrong colour.
+        if typed != text && !known.contains(typed.as_str()) {
             text = typed;
             keep *= 0.9;
         }
@@ -231,6 +239,12 @@ pub fn train(d: &Derived, cfg: &Config, device: &Device) -> Result<(Model, Vec<E
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let split = build_examples(d, cfg, &mut rng);
     let noise_words: Vec<String> = d.vocabulary.iter().take(2000).cloned().collect();
+    let known: HashSet<&str> = d
+        .strings
+        .iter()
+        .map(|s| s.text.as_str())
+        .chain(d.vocabulary.iter().map(String::as_str))
+        .collect();
 
     println!(
         "train {} examples ({} with answers), holdout {}",
@@ -267,7 +281,7 @@ pub fn train(d: &Derived, cfg: &Config, device: &Device) -> Result<(Model, Vec<E
 
             for &i in chunk {
                 let e = &split.train[i];
-                let (text, keep) = augment(e, &noise_words, cfg, &mut rng);
+                let (text, keep) = augment(e, &noise_words, &known, cfg, &mut rng);
                 texts.push(text);
                 pairs.push((e, keep));
             }

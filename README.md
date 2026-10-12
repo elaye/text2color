@@ -77,8 +77,8 @@ Every training string has a target distribution built the same way:
   labels against the survey is in `train/labels/pilot-*.tsv`.
 - **Weighting**: each string weighs the square root of its total answers and pseudo-answers, so
   a bare "blue" with 270 k answers outweighs the many phrases sharing its n-grams.
-- **Augmentation**: accents dropped on half the accented examples, random typos and noise
-  words, each moving part of the target toward the pooled answers (10 % and 30 %), since they
+- **Augmentation**: accents dropped on half the accented examples, random typos (never one
+  that spells another known word, as "fraise" → "frais") and noise words, each moving part of the target toward the pooled answers (10 % and 30 %), since they
   make the intended color less certain. Random pairs of words get the pooled answers as target.
 - **Temperature**: one softmax temperature is fitted on a calibration fold of the survey so
   that confidences match measured agreement.
@@ -94,14 +94,14 @@ From `just eval` on the shipped model (x86_64 desktop, single thread):
 
 | metric | value |
 |---|---|
-| hold-out mean Oklab error (survey strings people agree on) | 0.088 |
-| xkcd 949 names, median / p90 Oklab error | 0.044 / 0.094 |
-| xkcd names in French, median / p90 Oklab error | 0.044 / 0.094 |
-| CSS 148 named colors (unseen), median / p90 Oklab error | 0.093 / 0.226 |
-| hold-out labelled words, gate agrees with the label | 96.5 % |
-| hold-out words without a color passing 0.5 | 1.7 % |
-| typo robustness (one random edit keeps the color) | 70.5 % |
-| latency per query | 82 µs |
+| hold-out mean Oklab error (survey strings people agree on) | 0.089 |
+| xkcd 949 names, median / p90 Oklab error | 0.044 / 0.093 |
+| xkcd names in French, median / p90 Oklab error | 0.045 / 0.095 |
+| CSS 148 named colors (unseen), median / p90 Oklab error | 0.092 / 0.226 |
+| hold-out labelled words, gate agrees with the label | 94.7 % |
+| hold-out words without a color passing 0.5 | 1.9 % |
+| typo robustness (one random edit keeps the color) | 68.4 % |
+| latency per query | 83 µs |
 | weights file (f16) | 8.9 MB |
 
 A just-noticeable Oklab difference is about 0.02. Halving the hash table (`--log2-buckets 16`)
